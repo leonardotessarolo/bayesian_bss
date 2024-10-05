@@ -1,0 +1,2 @@
+
+    Runs perfect model and slightly misspecified model with 100 observations and 200 Metropolis-Hastings steps.
