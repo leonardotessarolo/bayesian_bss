@@ -67,8 +67,11 @@ class LogisticSource:
     def get_realization(
         self,
         nsources,
-        nobs
+        nobs,
+        seed=None
     ):
+        if seed is not None:
+            np.random.seed(seed)
         return np.random.logistic(
             loc=self.mu,
             scale=self.sigma,
@@ -146,8 +149,12 @@ class TriangularSource:
     def get_realization(
         self,
         nsources,
-        nobs
+        nobs,
+        seed
     ):
+        if seed is not None:
+            np.random.seed(seed)
+            
         return np.random.triangular(
             left=self.lower,
             mode=self.mode,
