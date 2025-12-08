@@ -276,17 +276,17 @@ class MAPGradientAscentEstimator:
         initial_B=initial_condition
         
         # Execute Optimizations
-        with ProcessPool(n_jobs) as p:
-            results=p.map(
-                exec_fn, 
-                [
-                    initial_B[:,:,i] for i in range(initial_B.shape[-1])
-                ]
-            )
+        # with ProcessPool(n_jobs) as p:
+        #     results=p.map(
+        #         exec_fn, 
+        #         [
+        #             initial_B[:,:,i] for i in range(initial_B.shape[-1])
+        #         ]
+        #     )
         # For debugging
-        # results = [
-        #     exec_fn(initial_B[:,:,i]) for i in range(initial_B.shape[-1])
-        # ]
+        results = [
+            exec_fn(initial_B[:,:,i]) for i in range(initial_B.shape[-1])
+        ]
 
         __parse_GradientAscent_results(
             gradient_ascent_results=results
@@ -513,17 +513,17 @@ class MMSEMetropolisHastingsEstimator:
         initial_B=initial_condition
 
         # Execute MCMC realizations with different starting points
-        with ProcessPool(n_jobs) as p:
-            results=p.map(
-                exec_fn, 
-                [
-                    initial_B[:,:,i] for i in range(initial_B.shape[-1])
-                ]
-            )
+        # with ProcessPool(n_jobs) as p:
+        #     results=p.map(
+        #         exec_fn, 
+        #         [
+        #             initial_B[:,:,i] for i in range(initial_B.shape[-1])
+        #         ]
+        #     )
         # For debugging
-        # results = [
-        #     exec_fn(initial_B[:,:,i]) for i in range(initial_B.shape[-1])
-        # ]
+        results = [
+            exec_fn(initial_B[:,:,i]) for i in range(initial_B.shape[-1])
+        ]
 
         # Parse results
         __parse_MCMC_results(

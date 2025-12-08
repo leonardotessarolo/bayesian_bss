@@ -190,10 +190,11 @@ class PosteriorContourLines:
         )
         
         # Execute posteriori calculations
-        with pathos.multiprocessing.ProcessingPool(njobs) as p:
-            results = p.map(exec_fn, iterator)
-        # for idx in iterator:
-        #     exec_fn(idx)
+        # with pathos.multiprocessing.ProcessingPool(njobs) as p:
+        #     results = p.map(exec_fn, iterator)
+        results = []
+        for idx in iterator:
+            results.append(exec_fn(idx))
 
         # Parse results
         z = np.empty(
@@ -227,6 +228,6 @@ class PosteriorContourLines:
         self.u_max = self.u_vec[self.max_post_point[0]]
         self.v_max = self.v_vec[self.max_post_point[1]]
         
-        print('-'*100)
-        print('Ponto de máximo: u={}, v={}'.format(self.u_max, self.v_max))
-        print('-'*100)
+        # print('-'*100)
+        # print('Ponto de máximo: u={}, v={}'.format(self.u_max, self.v_max))
+        # print('-'*100)
