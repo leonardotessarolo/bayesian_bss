@@ -6,6 +6,7 @@ import functools
 import dill
 from .estimator import BayesianEstimators
 from .contour_line import PosteriorContourLines
+import time
 
 class ExperimentExecutor:
 
@@ -105,7 +106,8 @@ class ExperimentExecutor:
                 burn_in_mcmc=self.cfg['mcmc']['burn_in'],
                 learning_rate_grad_asc=self.cfg['map']['learning_rate'],
                 stopping_thresh_grad_asc=self.cfg['map']['stopping_thresh'],
-                max_it_grad_asc=self.cfg['map']['max_it']
+                max_it_grad_asc=self.cfg['map']['max_it'],
+                stopping_criterion_persistance_its_grad_asc=self.cfg['map']['stopping_criterion_persistance_its']
             )
 
             # Save MAP and MCMC configs
@@ -141,6 +143,7 @@ class ExperimentExecutor:
         def __run_contour(
             u_lims,
             v_lims,
+            central_point,
             contour_grid_points,
             source_model_pdf,
             prior_pdf,
@@ -157,7 +160,7 @@ class ExperimentExecutor:
                 u_lims=u_lims,
                 v_lims=v_lims,
                 n_points=contour_grid_points,
-                central_point=(0,0),
+                central_point=central_point,
                 source_pdf_fn=source_model_pdf,
                 prior_pdf_fn=prior_pdf,
             )
@@ -193,6 +196,7 @@ class ExperimentExecutor:
                 __run_contour,
                 self.cfg['contour']['u_lims'],
                 self.cfg['contour']['v_lims'],
+                self.cfg['contour']['central_point'],
                 self.cfg['contour']['contour_grid_points'],
                 test_case_cfgs['grad_asc_configs']['source_pdf'],
                 test_case_cfgs['grad_asc_configs']['prior_pdf'],
@@ -271,12 +275,8 @@ class ExperimentExecutor:
 
             if success_flag=='SUCCESS':
                 finished_realizations.append(str(r))
-
-
-
         
         
-
         # Get realizations to run
         unfinished_realizations_signals = {
             k:v for k, v in self.signals.items() if k not in finished_realizations
@@ -375,22 +375,116 @@ class ExperimentExecutor:
         )
         
         # Run experiment for each realization
-        # iterable = self.signals.items()
         iterable = self.__get_iterable()
         with pathos.pools.ProcessPool(self.cfg['general']['n_workers']) as p:
-            # results=p.map(
-            #     realization_fn, 
-            #     iterable
-            # )
+            p.map(
+                realization_fn, 
+                iterable
+            )
+
+    def rerun_contour(
+        self,
+        test_cases
+    ):
+        def __run_realization(
+            cfg,
+            test_cases,
+            realization_info,
+        ):
+            """
+                Runs experiment for one realization
+            """
+
+            # Parse realization info
+            realization_name = realization_info[0]
+            realization_cfgs = realization_info[-1]
+
+            # Read success flag
+            realization_dir = self.cfg['general']['experiment_dir'] / realization_name
+            with (realization_dir/'results_raw.pkl').open('rb') as f:
+                realization_cfgs = dill.load(f)
+            
+
+            # start_time = time.time()
+            
+            # Iterate over test cases and execute experiment
+            realization_results = {}
+            # last_time = start_time
+            for test_case, test_case_cfgs in self.cfg['sim']['test_cases'].items():
+
+                if test_case not in test_cases:
+                    continue
+                
+                # Source for test case
+                test_case_source = test_case_cfgs['source']
+
+                # Obtain sources and mixtures
+                s = realization_cfgs[test_case_source]['s']
+                x = realization_cfgs[test_case_source]['x']
+                
+                # Retrieve function for executing posteriori grid calculation
+                posteriori_grid_fn = test_case_cfgs['posteriori_grid_fn']
+                
+                # Run posteriori grid calculation
+                posteriori_grid = posteriori_grid_fn(x=x)
+                
+                # Updates realization cfgs
+                realization_cfgs['results'][test_case]['posteriori_grid'] = posteriori_grid
+
+                # # Time
+                # test_case_finish_time = time.time()
+
+                # # print('Test case {} ok. Elapsed time: {}'.format(test_case, test_case_finish_time - last_time))
+
+                # last_time = test_case_finish_time
+
+
+            # Save results
+            realization_dir = cfg['general']['experiment_dir']  / realization_name
+            with (realization_dir/'results_raw.pkl').open('wb') as f:
+                dill.dump(realization_cfgs, f)
+
+            with (realization_dir/'success_flag.pkl').open('wb') as f:
+                dill.dump('SUCCESS', f)
+            
+
+            # return (realization_name, realization_cfgs)
+                
+
+        # Initializations that aren't for signals #
+
+        # Get source model and prior distributions
+        self.__get_test_case_distributions()
+
+        # Get execution functions for test cases
+        self.__get_exec_fns()
+
+        # Get experiment_dir
+        experiment_dir = self.cfg['general']['experiment_dir']
+
+        # Save updated config file
+        with (experiment_dir/'execution_config.pkl').open('wb') as f:
+                dill.dump(self.cfg, f)
+
+        # Create execution functions for each realization
+        realization_fn = functools.partial(
+            __run_realization,
+            self.cfg,
+            test_cases
+        )
+        
+        # Run experiment for each realization
+        iterable = self.__get_iterable()
+        with pathos.pools.ProcessPool(self.cfg['general']['n_workers']) as p:
             p.map(
                 realization_fn, 
                 iterable
             )
 
         
-        # DEBUG
+        # # DEBUG
         # results = []
-        # for realization_info in self.signals.items():
+        # for realization_info in iterable:
             
         #     results.append(
         #         realization_fn(
@@ -426,7 +520,9 @@ class ExperimentParser:
     ):
         # Get realization dirs
         realizations = [x[1] for x in os.walk(self.experiment_dir)][0]
+        realizations = [r for r in realizations if r not in ['analysis_all_realizations', 'hypothesis_tests']]
         realizations_results = {}
+        finished_realizations = []
         non_executed_realizations = []
         for r in realizations:
             # Get directory for realization
@@ -436,7 +532,17 @@ class ExperimentParser:
                 with (realization_dir/'results_raw.pkl').open('rb') as f:
                         realizations_results[r] = dill.load(f)
             except:
-                non_executed_realizations.append(r)
+                # non_executed_realizations.append(r)
+                pass
+
+            # Read success flag
+            with (realization_dir/'success_flag.pkl').open('rb') as f:
+                success_flag = dill.load(f)
+
+            if success_flag=='SUCCESS':
+                finished_realizations.append(str(r))
+            else:
+                non_executed_realizations.append(str(r))
         
         # Save to object attributes
         self.realizations_results = realizations_results
@@ -444,7 +550,7 @@ class ExperimentParser:
         
         if verbose:
             print('#'*100)
-            print('Total of {} realizations with executed results'.format(len(realizations_results.keys())))
+            print('Total of {} realizations with executed results'.format(len(finished_realizations)))
             print('-'*100)
             print('Total of {} realizations without executed results'.format(len(non_executed_realizations)))
             print('#'*100)
@@ -463,7 +569,7 @@ class ExperimentParser:
 
             # Get error for MMSE estimate
             mmse_error_norm = np.linalg.norm(
-            np.subtract(
+                np.subtract(
                     B_est_mmse,
                     np.linalg.inv(A)
                 )
@@ -481,7 +587,7 @@ class ExperimentParser:
 
             # Get error for MAP estimate
             map_error_norm = np.linalg.norm(
-            np.subtract(
+                np.subtract(
                     B_est_map,
                     np.linalg.inv(A)
                 )
