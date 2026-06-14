@@ -5,3 +5,4 @@ from .contour_line import PosteriorContourLines
 from .prior import ExponentialPrior
 from .source import LogisticSource, TriangularSource
 from .executor import ExperimentExecutor, ExperimentParser
+from .hypothesis_tests import HypothesisTestsCases

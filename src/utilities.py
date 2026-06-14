@@ -35,7 +35,7 @@ class SignalGraphPlotter:
                 density=True,
                 label='s{}'.format(i-1),
                 alpha=0.5,
-                bin_cfg='auto'
+                # bin_cfg='auto'
             )
             ax2.hist(
                 x=s[i-1,:],
@@ -44,7 +44,7 @@ class SignalGraphPlotter:
                 density=True,
                 label='s{}'.format(i-1),
                 alpha=0.5,
-                bin_cfg='auto'
+                # bin_cfg='auto'
             )
             
         ax1.plot(
@@ -195,7 +195,7 @@ class MCMCGraphPlotter:
             fontsize=label_size
         )
         axs[0,0].set_ylabel(
-            '$B_{00}$',
+            '$b_{11}$',
             fontsize=label_size
         )
         axs[0,0].set_title(
@@ -233,7 +233,7 @@ class MCMCGraphPlotter:
             fontsize=label_size
         )
         axs[0,1].set_ylabel(
-            '$B_{01}$',
+            '$b_{12}$',
             fontsize=label_size
         )
         axs[0,1].set_title(
@@ -271,7 +271,7 @@ class MCMCGraphPlotter:
             fontsize=label_size
         )
         axs[1,0].set_ylabel(
-            '$B_{10}$',
+            '$B_{21}$',
             fontsize=label_size
         )
         axs[1,0].set_title(
@@ -309,7 +309,7 @@ class MCMCGraphPlotter:
             fontsize=label_size
         )
         axs[1,1].set_ylabel(
-            '$B_{11}$',
+            '$B_{22}$',
             fontsize=label_size
         )
         axs[1,1].set_title(
@@ -588,7 +588,7 @@ class MCMCGraphPlotter:
         # Plot sampled coefficients
         fig, axs = plt.subplots(
             nrows=2, ncols=2,
-            figsize=(25,9)
+            figsize=(25,15)
         )
         
         # B_00
@@ -623,10 +623,10 @@ class MCMCGraphPlotter:
             'density',
             fontsize=label_size
         )
-        # axs[0,0].set_title(
-        #     '(a)',
-        #     fontsize=label_size
-        # )
+        axs[0,0].set_title(
+            '(a)',
+            fontsize=label_size
+        )
         axs[0,0].tick_params(
             axis='both',
             labelsize=tick_size
@@ -679,10 +679,10 @@ class MCMCGraphPlotter:
             'density',
             fontsize=label_size
         )
-        # axs[0,1].set_title(
-        #     '(b)',
-        #     fontsize=label_size
-        # )
+        axs[0,1].set_title(
+            '(b)',
+            fontsize=label_size
+        )
         axs[0,1].tick_params(
             axis='both',
             labelsize=tick_size
@@ -734,10 +734,10 @@ class MCMCGraphPlotter:
             'density',
             fontsize=label_size
         )
-        # axs[1,0].set_title(
-        #     '(c)',
-        #     fontsize=label_size
-        # )
+        axs[1,0].set_title(
+            '(c)',
+            fontsize=label_size
+        )
         axs[1,0].tick_params(
             axis='both',
             labelsize=tick_size
@@ -789,10 +789,10 @@ class MCMCGraphPlotter:
             'density',
             fontsize=label_size
         )
-        # axs[1,1].set_title(
-        #     '(d)',
-        #     fontsize=label_size
-        # )
+        axs[1,1].set_title(
+            '(d)',
+            fontsize=label_size
+        )
         axs[1,1].tick_params(
             axis='both',
             labelsize=tick_size
@@ -835,17 +835,18 @@ class MCMCGraphPlotter:
         print('-'*100)
         
         fig = plt.figure(figsize=(20,7))
+        logs['log_posterior']=logs['log_posterior']/1000
         sns.lineplot(
             data=logs,
             x='iteration',
             y='log_posterior'
         )
         plt.ylabel(
-            '$\log P(\hat{B}|X)$',
+            r'$\frac{1}{N} \log p_{\bf{B}|\mathcal{X}}(\bf{B}|\mathcal{X})$',
             fontsize=label_size
         )
         plt.xlabel(
-            'iteration',
+            'k',
             fontsize=label_size
         )
         plt.xticks(
@@ -1046,11 +1047,11 @@ class MAPGradientAscentGraphPlotter:
             y='log_posterior'
         )
         plt.ylabel(
-            '$\log P(\hat{B}|X)$',
+            r'$\frac{1}{N} \log p_{\bf{B}|\mathcal{X}}(\bf{B}|\mathcal{X})$',
             fontsize=label_size
         )
         plt.xlabel(
-            'iteration',
+            'k',
             fontsize=label_size
         )
         plt.xticks(
@@ -1338,8 +1339,8 @@ class ContourLineGraphPlotter:
         z,
         max_post_point,
         save_dir=None,
-        label_size=15,
-        tick_size=15,
+        label_size=30,
+        tick_size=30,
     ):
 
         print('-'*100)
@@ -1559,24 +1560,59 @@ class EstimationGraphPlotter:
         z,
         max_us,
         max_vs,
+        N=None,
+        posterior_step=0.1,
+        levels=200,
+        u_lims=(-0.4, 0.4),
+        v_lims=(-0.4, 0.4),
         save_dir=None,
-        label_size=15,
-        tick_size=15,
+        save_name=None,
+        label_size=30,
+        tick_size=30,
     ):
+        
+        plt.rcParams['axes.facecolor'] = 'white'
+        plt.rcParams['savefig.facecolor'] = 'white'
+        plt.rcParams['axes.grid'] = True
+        plt.rcParams['grid.color'] = 'lightgray'
+        plt.rcParams['grid.linestyle'] = '--'
+        plt.rcParams['grid.linewidth'] = 0.5
 
         print('-'*100)
         print('Normalized log-posterior (average)')
         print('-'*100)
-        
-        fig = plt.figure(figsize=(20,7))
+
+        # Normalize posterior
+        if N is not None:
+            z = z/N
+
+        # Obtain max and min values for contours
+        max_post = np.max([
+            x for x in z.flatten() if x < np.inf
+        ])
+        min_post = np.min([
+            x for x in z.flatten() if x > -np.inf
+        ])
+
+        # Calculates contour levels based on specified posterior step
+        contour_level = max_post
+        levels = []
+        while contour_level > min_post:
+            contour_level -= posterior_step
+            levels.append(contour_level)
+
+        fig, ax = plt.subplots(
+            nrows=1, ncols=1, 
+            figsize=(20,7)
+        )
 
         U, V = np.meshgrid(u_vec, v_vec)
-        
+        # import pdb; pdb.set_trace()
         plt.contour(
             U,
             V,
             z.T,
-            levels=50,
+            levels=np.flip(levels),
             cmap='copper',
             label='curva media'
         )
@@ -1597,17 +1633,41 @@ class EstimationGraphPlotter:
             'v',
             fontsize=label_size
         )
+        if u_lims is not None:
+            plt.xlim(u_lims)
+        if v_lims is not None:
+            plt.ylim(v_lims)
+        
+        for spine in ['bottom', 'top', 'left', 'right']:
+            ax.spines[spine].set_color('black')
 
         plt.xticks(
+            np.append(
+                np.arange(u_lims[0], u_lims[-1],0.1),
+                u_lims[-1]
+            ),
             fontsize=tick_size
         )
         plt.yticks(
+            np.append(
+                np.arange(v_lims[0], v_lims[-1],0.1),
+                v_lims[-1]
+            ),
             fontsize=tick_size
         )
-        plt.legend(
-            loc='upper right',
-            fontsize=15
-        )
+        # plt.legend(
+        #     loc='upper right',
+        #     fontsize=15
+        # )
+
+        # Save figure, if so specified
+        if save_dir is not None:
+            fig.savefig(
+                str(
+                    (save_dir / '{}.png'.format(save_name if save_name is not None else 'contour'))
+                ),
+                bbox_inches='tight'
+            )
 
         # if save_dir is not None:
         #     fig.savefig(
@@ -1621,6 +1681,7 @@ class EstimationGraphPlotter:
         #         str(
         #             (save_dir / 'steady_state_marginal_distributions.png')
 
+
     @classmethod
     def plot_test_cases_contours(
         cls,
@@ -1630,74 +1691,62 @@ class EstimationGraphPlotter:
         v_range=(-0.3, 0.3),
         equal_aspect=False,
         marker_size=40,
-        return_stats=True
+        return_stats=True,
+        save_dir=None,
+        save_name=None,
+        label_size=20,
+        legend_size=20,
+        transparency=0.2,
+        legend_location=None
     ):
-        # Filter out desired test cases, if so specified
-        parsed_results = parser.parsed_results
-        
-        if test_cases is not None:
-            parsed_results = {
-                k: v for k, v in parser.parsed_results.items() if k in test_cases
-            }
-    
-        # Create dataframe for plotting
-        plot_df = pd.DataFrame()
-        for test_case, test_case_results in parsed_results.items():
-            # Retrieve u coordinate for maximums
-            u_vec = [
-                u for u,v in test_case_results['posteriori_grid']['maximums']
-            ]
-    
-            # Retrieve v coordinate for maximums
-            v_vec = [
-                v for u,v in test_case_results['posteriori_grid']['maximums']
-            ]
-    
-            # Append dataframe
-            plot_df = pd.concat(
-                [
-                    plot_df,
-                    pd.DataFrame(
-                        data={
-                            'test_case': [test_case]*len(test_case_results['posteriori_grid']['maximums']),
-                            'u': u_vec,
-                            'v': v_vec
-                        }
-                    )
-                ],
-                axis=0
-            ).reset_index(
-                drop=True
-            )
-    
-        # Create plot
-        fig, ax = plt.subplots(
-            nrows=1, ncols=1,
-            figsize=(20,7)
-        )
-        if equal_aspect:
-            ax.set_aspect('equal')
-        sns.scatterplot(
-            data=plot_df,
-            x='u',
-            y='v',
-            hue='test_case',
-            style='test_case',
-            # markers = ['+', 'x'],
-            markers = ['s', '>', '<','o'],
-            **{
-                's': marker_size
-            }
-        )
-        plt.title(
-            'Casos de teste: {}'.format(', '.join(test_cases)),
-            fontsize=15
-        )
-        plt.xlim(u_range)
-        plt.ylim(v_range)
+            
+            plt.rcParams['axes.facecolor'] = 'white'
+            plt.rcParams['savefig.facecolor'] = 'white'
+            plt.rcParams['axes.grid'] = True
+            plt.rcParams['grid.color'] = 'lightgray'
+            plt.rcParams['grid.linestyle'] = '--'
+            plt.rcParams['grid.linewidth'] = 0.5
 
-        # Calculate statistics, if so specified
-        if return_stats:
+
+            # Filter out desired test cases, if so specified
+            parsed_results = parser.parsed_results
+            
+            if test_cases is not None:
+                parsed_results = {
+                    k: v for k, v in parser.parsed_results.items() if k in test_cases
+                }
+
+            # Create dataframe for plotting
+            plot_df = pd.DataFrame()
+            for test_case, test_case_results in parsed_results.items():
+                # Retrieve u coordinate for maximums
+                u_vec = [
+                    u for u,v in test_case_results['posteriori_grid']['maximums']
+                ]
+
+                # Retrieve v coordinate for maximums
+                v_vec = [
+                    v for u,v in test_case_results['posteriori_grid']['maximums']
+                ]
+
+                # Append dataframe
+                plot_df = pd.concat(
+                    [
+                        plot_df,
+                        pd.DataFrame(
+                            data={
+                                'test_case': [test_case]*len(test_case_results['posteriori_grid']['maximums']),
+                                'u': u_vec,
+                                'v': v_vec
+                            }
+                        )
+                    ],
+                    axis=0
+                ).reset_index(
+                    drop=True
+                )
+
+            # Get stats
             stats_df = plot_df.groupby(
                 by='test_case',
                 as_index=False
@@ -1707,8 +1756,411 @@ class EstimationGraphPlotter:
                 u_std=('u', 'std'),
                 v_std=('v', 'std')
             )
+
+
+            # Create plot
+            fig, ax = plt.subplots(
+                nrows=1, ncols=1,
+                figsize=(20,7)
+            )
+            if equal_aspect:
+                ax.set_aspect('equal')
+
+            sns.scatterplot(
+                data=plot_df.rename(
+                    columns={
+                        'test_case': 'Caso de Teste'
+                    }
+                ),
+                x='u',
+                y='v',
+                hue='Caso de Teste',
+                style='Caso de Teste',
+                alpha=transparency,
+                markers = ['s', '>', '<','o'],
+                legend=False,
+                **{
+                    's': marker_size
+                }
+            )
+            sns.scatterplot(
+                data=stats_df.rename(
+                    columns={
+                        'test_case': 'Caso de Teste',
+                        'u_mean': 'u',
+                        'v_mean':'v'
+                    }
+                ),
+                x='u',
+                y='v',
+                hue='Caso de Teste',
+                style='Caso de Teste',
+                markers = ['s', '>', '<','o'],
+                **{
+                    's': 3*marker_size
+                }
+            )
+
+            for spine in ['bottom', 'top', 'left', 'right']:
+                ax.spines[spine].set_color('black')
+
+            if legend_location is not None:
+                sns.move_legend(ax, legend_location)
+            
+            plt.xlim(u_range)
+            plt.ylim(v_range)
+            plt.ylabel('v',fontsize=label_size)
+            plt.xlabel('u', fontsize=label_size)
+            plt.xticks(fontsize=label_size)
+            plt.yticks(fontsize=label_size)
+            
+            plt.setp(
+                ax.get_legend().get_texts(),
+                fontsize=legend_size
+            )
+            plt.setp(
+                ax.get_legend().get_title(),
+                fontsize=legend_size
+            )
+            
+
+            # Save figure, if so specified
+            if save_dir is not None:
+                fig.savefig(
+                    str(
+                        (save_dir / '{}.png'.format(save_name if save_name is not None else 'contours'))
+                    ),
+                    bbox_inches='tight'
+                )
+
+            # Calculate statistics, if so specified
+            if return_stats:
+                return stats_df
+
+    def plot_map_mmse_errors_boxplots(
+        parser,
+        test_cases=None,
+        B_true=None,
+        return_stats=True,
+        yranges = None,
+        whis_lims=(5,95),
+        box_color='gray',
+        box_linecolor='black',
+        box_linewidth=.5,
+        save_dir=None,
+        save_name=None,
+        label_size=20,
+        legend_size=20,
+    ):
+            
+        plt.rc(
+            'legend',
+            fontsize=legend_size,
+            title_fontsize=legend_size
+        )
+
+        plt.rcParams['axes.facecolor'] = 'white'
+        plt.rcParams['savefig.facecolor'] = 'white'
+
+        plt.rc('axes', labelsize=label_size)
+        plt.rc('xtick', labelsize=label_size)
+        plt.rc('ytick', labelsize=label_size)
+
+        # Filter out desired test cases, if so specified
+        parsed_results = parser.parsed_results
+        
+        if test_cases is not None:
+            parsed_results = {
+                k: v for k, v in parser.parsed_results.items() if k in test_cases
+            }
+
+        # Create dataframe for plotting
+        plot_df = pd.DataFrame()
+        for estimate_type in ['map', 'mmse']:
+            for test_case, test_case_results in parsed_results.items():
+
+                # Create estimate dataframe
+                plot_df = pd.concat(
+                    [
+                        plot_df,
+                        pd.DataFrame(
+                            data={
+                                'estimate_type': [estimate_type]*len(test_case_results[estimate_type]['estimates']),
+                                'test_case': [test_case]*len(test_case_results[estimate_type]['estimates']),
+                                'b11': test_case_results[estimate_type]['b11_estimates'],
+                                'b12': test_case_results[estimate_type]['b12_estimates'],
+                                'b21': test_case_results[estimate_type]['b21_estimates'],
+                                'b22': test_case_results[estimate_type]['b22_estimates']
+                            }
+                        )
+                    ],
+                    axis=0
+                ).reset_index(
+                    drop=True
+                )
+
+
+
+        # Plot B_true, if so specified
+        if B_true is not None:
+            for i,j in np.ndindex(B_true.shape):
+                plot_df['b{}{}'.format(i+1, j+1)] = (plot_df['b{}{}'.format(i+1, j+1)] - B_true[i,j])/np.abs(B_true[i,j])
+
+        # Calculate stats_df
+        stats_df = plot_df.groupby(
+            by=['estimate_type','test_case'],
+            as_index=False
+        ).agg(
+            b11_mean=('b11', 'mean'),
+            b12_mean=('b12', 'mean'),
+            b21_mean=('b21', 'mean'),
+            b22_mean=('b22', 'mean'),
+            b11_std=('b11', 'std'),
+            b12_std=('b12', 'std'),
+            b21_std=('b21', 'std'),
+            b22_std=('b22', 'std')
+        )
+
+        # Create plot
+        fig, axs = plt.subplots(
+            nrows=2, ncols=2,
+            figsize=(20,12)
+        )
+
+        # Create plots in axes
+        for i,j in np.ndindex((2,2)):
+            # Get coefficient
+            coeff = 'b{}{}'.format(i+1,j+1)
+            coeff_pos = coeff[1:]
+
+            # Plot horizontal line at 0
+            axs[i,j].axhline(
+                0,
+                color='lightgray',
+                linestyle='--'
+            )
+
+            sns.boxplot(
+                data=plot_df.rename(
+                    columns={'estimate_type': 'Tipo de Estimativa'}
+                ),
+                x='test_case',
+                y=coeff,
+                hue='Tipo de Estimativa',
+                # color=box_color,
+                # linecolor=box_linecolor,
+                # linewidth=box_linewidth,
+                whis=whis_lims,
+                width=.7,
+                showfliers=False,
+                ax=axs[i,j]
+            )
+            axs[i,j].set_ylabel(
+                # r'$\widehat{{b}}_{}-\overline{{b}}_{}$/\overline{{b}}_{}'.format(
+                #     '{' + coeff_pos + '}',
+                #     '{' + coeff_pos + '}',
+                #     '{' + coeff_pos + '}'
+                # )
+                r'$\delta_{{b}}(\widehat{{b}}_{})$'.format(
+                    '{' + coeff_pos + '}',
+                    # '{' + coeff_pos + '}',
+                    # '{' + coeff_pos + '}'
+                )
+            )
+            for spine in ['bottom', 'top', 'left', 'right']:
+                axs[i,j].spines[spine].set_color('black')
+            
+            axs[i,j].set_xlabel(
+                'Caso de Teste'
+            )
+            # axs[i,j].grid(
+            #     visible=True,
+            #     axis='y',
+            #     **{
+            #         'color': 'black',
+            #         'linestyle': '--'
+            #     }
+            # )
+            if yranges is not None:
+                axs[i,j].set_ylim(
+                    yranges[coeff][0],
+                    yranges[coeff][-1],
+                )
+            
+            # Plot vertical lines
+            [
+                axs[i,j].axvline(
+                    x+.5,
+                    color='lightgray',
+                    linestyle='--'
+                ) for x in axs[i,j].get_xticks()
+            ]
+
+            # Figure legend
+            if coeff_pos=='11':
+                handles, labels = axs[i,j].get_legend_handles_labels()
+                # Create a figure-level legend
+                fig.legend(
+                    handles,
+                    labels,
+                    loc='upper center',
+                    ncol=3,
+                    bbox_to_anchor=(0.5, 0.925)
+                )
+
+            # Remove axes legend
+            axs[i,j].get_legend().set_visible(False)
+
+            
+        
+        # Save figure, if so specified
+        if save_dir is not None:
+            fig.savefig(
+                str(
+                    (save_dir / '{}.png'.format(save_name if save_name is not None else 'coeffs_estimates_boxplots'))
+                ),
+                bbox_inches='tight'
+            )
+            
+        # Calculate statistics, if so specified
+        if return_stats:
+            return stats_df
+        
+    @classmethod
+    def plot_coefficient_estimates_boxplots(
+        cls,
+        parser,
+        estimate_type,
+        test_cases=None,
+        B_true=None,
+        return_stats=True,
+        xranges = None,
+        whis_lims=(5,95),
+        box_color='gray',
+        box_linecolor='black',
+        box_linewidth=.5,
+        save_dir=None,
+        save_name=None,
+        label_size=20,
+        legend_size=20,
+    ):
+            
+        plt.rc(
+            'legend',
+            fontsize=legend_size,
+            title_fontsize=legend_size
+        )
+
+        plt.rc('axes', labelsize=label_size)
+        plt.rc('xtick', labelsize=label_size)
+        plt.rc('ytick', labelsize=label_size)
+
+        # Filter out desired test cases, if so specified
+        parsed_results = parser.parsed_results
+        
+        if test_cases is not None:
+            parsed_results = {
+                k: v for k, v in parser.parsed_results.items() if k in test_cases
+            }
+
+        # Create dataframe for plotting
+        plot_df = pd.DataFrame()
+        for test_case, test_case_results in parsed_results.items():
+
+            # Append dataframe
+            plot_df = pd.concat(
+                [
+                    plot_df,
+                    pd.DataFrame(
+                        data={
+                            'test_case': [test_case]*len(test_case_results[estimate_type]['estimates']),
+                            'b11': test_case_results[estimate_type]['b11_estimates'],
+                            'b12': test_case_results[estimate_type]['b12_estimates'],
+                            'b21': test_case_results[estimate_type]['b21_estimates'],
+                            'b22': test_case_results[estimate_type]['b22_estimates'],
+                        }
+                    )
+                ],
+                axis=0
+            ).reset_index(
+                drop=True
+            )
+
+        # Plot B_true, if so specified
+        if B_true is not None:
+            for i,j in np.ndindex(B_true.shape):
+                plot_df['b{}{}'.format(i+1, j+1)] = plot_df['b{}{}'.format(i+1, j+1)] - B_true[i,j]
+
+        # Calculate stats_df
+        stats_df = plot_df.groupby(
+            by='test_case',
+            as_index=False
+        ).agg(
+            b11_mean=('b11', 'mean'),
+            b12_mean=('b12', 'mean'),
+            b21_mean=('b21', 'mean'),
+            b22_mean=('b22', 'mean'),
+            b11_std=('b11', 'std'),
+            b12_std=('b12', 'std'),
+            b21_std=('b21', 'std'),
+            b22_std=('b22', 'std')
+        )
+
+        # Create plot
+        fig, axs = plt.subplots(
+            nrows=2, ncols=2,
+            figsize=(20,12)
+        )
+
+        # Create plots in axes
+        for i,j in np.ndindex((2,2)):
+            # Get coefficient
+            coeff = 'b{}{}'.format(i+1,j+1)
+            coeff_pos = coeff[1:]
+
+            sns.boxplot(
+                data=plot_df,
+                x=coeff,
+                y='test_case',
+                color=box_color,
+                linecolor=box_linecolor,
+                linewidth=box_linewidth,
+                whis=whis_lims,
+                width=.7,
+                showfliers=False,
+                ax=axs[i,j]
+            )
+            axs[i,j].set_xlabel(
+                r'$\widehat{{b}}_{}^{}-\overline{{b}}_{}$'.format(
+                    '{' + coeff_pos + '}',
+                    '{' + estimate_type.upper() + '}',
+                    '{' + coeff_pos + '}',
+                )
+            )
+            axs[i,j].set_ylabel(
+                'Caso de Teste'
+            )
+            if xranges is not None:
+                axs[i,j].set_xlim(
+                    xranges[coeff][0],
+                    xranges[coeff][-1],
+                )
+        
+        # Save figure, if so specified
+        if save_dir is not None:
+            fig.savefig(
+                str(
+                    (save_dir / '{}.png'.format(save_name if save_name is not None else 'coeffs_estimates_boxplots'))
+                ),
+                bbox_inches='tight'
+            )
+            
+        # Calculate statistics, if so specified
+        if return_stats:
             return stats_df
 
+
+        
 
     @classmethod
     def plot_test_cases_mmse_coefficient_estimates(
@@ -1717,11 +2169,21 @@ class EstimationGraphPlotter:
         test_cases=None,
         B_true=None,
         bin_cfg='auto',
-        return_stats=True
+        return_stats=True,
         # u_range=(-0.3, 0.3),
         # v_range=(-0.3, 0.3),
-
+        save_dir=None,
+        save_name=None,
+        label_size=20,
+        legend_size=20
     ):
+        
+        plt.rc(
+            'legend',
+            fontsize=legend_size,
+            title_fontsize=legend_size
+        )
+
         # Filter out desired test cases, if so specified
         parsed_results = parser.parsed_results
         
@@ -1759,10 +2221,10 @@ class EstimationGraphPlotter:
             figsize=(20,15)
         )
 
-        fig.suptitle(
-            'Casos de teste: {}'.format(', '.join(test_cases)),
-            fontsize=25
-        )
+        # fig.suptitle(
+        #     'Casos de teste: {}'.format(', '.join(test_cases)),
+        #     fontsize=25
+        # )
 
         # Plot B_true, if so specified
         if B_true is not None:
@@ -1775,43 +2237,88 @@ class EstimationGraphPlotter:
 
         # B11
         sns.histplot(
-            data=plot_df,
+            data=plot_df.rename(columns={'test_case': 'Caso de Teste'}),
             x='b11',
-            hue='test_case',
+            hue='Caso de Teste',
             hue_order=test_cases,
             bins=bin_cfg,
             ax=axs[0,0]
         )
+        axs[0,0].set_ylabel('Contagem de Realizações',fontsize=label_size)
+        axs[0,0].set_xlabel(r'$\widehat{b}_{11}^{MMSE}$',fontsize=label_size)
+        axs[0,0].tick_params(
+            axis='both',
+            labelsize=label_size
+        )
+        # axs[0,0].legend(
+        #     fontsize=legend_size
+        # )
 
         # B12
         sns.histplot(
-            data=plot_df,
+            data=plot_df.rename(columns={'test_case': 'Caso de Teste'}),
             x='b12',
-            hue='test_case',
+            hue='Caso de Teste',
             hue_order=test_cases,
             bins=bin_cfg,
             ax=axs[0,1]
         )
+        axs[0,1].set_ylabel('Contagem de Realizações',fontsize=label_size)
+        axs[0,1].set_xlabel(r'$\widehat{b}_{12}^{MMSE}$',fontsize=label_size)
+        axs[0,1].tick_params(
+            axis='both',
+            labelsize=label_size
+        )
+        # axs[0,1].legend(
+        #     fontsize=legend_size
+        # )
 
         # B21
         sns.histplot(
-            data=plot_df,
+            data=plot_df.rename(columns={'test_case': 'Caso de Teste'}),
             x='b21',
-            hue='test_case',
+            hue='Caso de Teste',
             hue_order=test_cases,
             bins=bin_cfg,
             ax=axs[1,0]
         )
+        axs[1,0].set_ylabel('Contagem de Realizações',fontsize=label_size)
+        axs[1,0].set_xlabel(r'$\widehat{b}_{21}^{MMSE}$',fontsize=label_size)
+        axs[1,0].tick_params(
+            axis='both',
+            labelsize=label_size
+        )
+        # axs[1,0].legend(
+        #     fontsize=legend_size
+        # )
 
         # B22
         sns.histplot(
-            data=plot_df,
+            data=plot_df.rename(columns={'test_case': 'Caso de Teste'}),
             x='b22',
-            hue='test_case',
+            hue='Caso de Teste',
             hue_order=test_cases,
             bins=bin_cfg,
             ax=axs[1,1]
         )
+        axs[1,1].set_ylabel('Contagem de Realizações',fontsize=label_size)
+        axs[1,1].set_xlabel(r'$\widehat{b}_{22}^{MMSE}$',fontsize=label_size)
+        axs[1,1].tick_params(
+            axis='both',
+            labelsize=label_size
+        )
+        # axs[1,1].legend(
+        #     fontsize=legend_size
+        # )
+
+        # Save figure, if so specified
+        if save_dir is not None:
+            fig.savefig(
+                str(
+                    (save_dir / '{}.png'.format(save_name if save_name is not None else 'mmse_coeffs'))
+                ),
+                bbox_inches='tight'
+            )
 
         # Calculate statistics, if so specified
         if return_stats:
@@ -1836,7 +2343,11 @@ class EstimationGraphPlotter:
         parser,
         test_cases=None,
         bin_cfg='fd',
-        return_stats=True
+        return_stats=True,
+        save_dir=None,
+        save_name=None,
+        label_size=20,
+        legend_size=20
     ):
         # Filter out desired test cases, if so specified
         parsed_results = parser.parsed_results
@@ -1867,17 +2378,401 @@ class EstimationGraphPlotter:
             )
     
         # Create plot
-        fig = plt.figure(figsize=(20,7))
-        sns.histplot(
-            data=plot_df,
+        fig = plt.figure(figsize=(20,10))
+        ax = sns.histplot(
+            data=plot_df.rename(
+                columns={'test_case':'Caso de Teste'}
+            ),
             x='errors',
-            hue='test_case',
+            hue='Caso de Teste',
             bins=bin_cfg
         )
-        plt.title(
-            'Casos de teste: {}'.format(', '.join(test_cases)),
-            fontsize=15
+        
+        plt.ylabel('Contagem de Realizações', fontsize=label_size)
+        plt.xlabel(r'$\delta_{\bf{B}}({\bf{B}})$', fontsize=label_size)
+        plt.xticks(fontsize=label_size)
+        plt.yticks(fontsize=label_size)
+        plt.setp(
+            ax.get_legend().get_texts(),
+            fontsize=legend_size
         )
+        plt.setp(
+            ax.get_legend().get_title(),
+            fontsize=legend_size
+        )
+
+        # Save figure, if so specified
+        if save_dir is not None:
+            fig.savefig(
+                str(
+                    (save_dir / '{}.png'.format(save_name if save_name is not None else 'mmse_errors'))
+                ),
+                # bbox_inches='tight'
+            )
+
+        # Calculate statistics, if so specified
+        if return_stats:
+            stats_df = plot_df.groupby(
+                by='test_case',
+                as_index=False
+            ).agg(
+                errors_mean=('errors', 'mean'),
+                errors_min=('errors', 'min'),
+                errors_max=('errors', 'max'),
+                errors_std=('errors', 'std')
+            )
+            return stats_df
+        
+    # @classmethod
+    # def plot_test_cases_map_coefficient_estimates(
+    #     cls,
+    #     parser,
+    #     test_cases=None,
+    #     B_true=None,
+    #     bin_cfg='auto',
+    #     return_stats=True,
+    #     save_dir=None,
+    #     save_name=None,
+    #     label_size=25,
+    #     legend_size=25
+    #     # u_range=(-0.3, 0.3),
+    #     # v_range=(-0.3, 0.3),
+
+    # ):
+    #     # Filter out desired test cases, if so specified
+    #     parsed_results = parser.parsed_results
+        
+    #     if test_cases is not None:
+    #         parsed_results = {
+    #             k: v for k, v in parser.parsed_results.items() if k in test_cases
+    #         }
+    
+    #     # Create dataframe for plotting
+    #     plot_df = pd.DataFrame()
+    #     for test_case, test_case_results in parsed_results.items():
+
+    #         # Append dataframe
+    #         plot_df = pd.concat(
+    #             [
+    #                 plot_df,
+    #                 pd.DataFrame(
+    #                     data={
+    #                         'test_case': [test_case]*len(test_case_results['map']['estimates']),
+    #                         'b11': test_case_results['map']['b11_estimates'],
+    #                         'b12': test_case_results['map']['b12_estimates'],
+    #                         'b21': test_case_results['map']['b21_estimates'],
+    #                         'b22': test_case_results['map']['b22_estimates'],
+    #                     }
+    #                 )
+    #             ],
+    #             axis=0
+    #         ).reset_index(
+    #             drop=True
+    #         )
+    
+    #     # Plot figures
+    #     for i,j in np.ndindex((2,2)):
+
+    #         fig = plt.figure(figsize=(10,10))
+
+    #         coeff = '{}{}'.format(i+1, j+1)
+
+    #         # Create histogram
+    #         ax = sns.histplot(
+    #             data=plot_df.rename(
+    #                 columns={'test_case':'Caso de Teste'}
+    #             ),
+    #             x='b{}'.format(coeff),
+    #             hue='Caso de Teste',
+    #             hue_order=test_cases,
+    #             bins=bin_cfg
+    #         )
+
+    #         # Set labels and ticks
+    #         plt.ylabel('Contagem de Realizações',fontsize=label_size)
+    #         plt.xlabel(r'$\widehat{{b}}_{}$'.format('{'+coeff+'}'),fontsize=label_size)
+    #         plt.xticks(fontsize=label_size)
+    #         plt.yticks(fontsize=label_size)
+    #         plt.setp(
+    #             ax.get_legend().get_texts(),
+    #             fontsize=legend_size
+    #         )
+
+    #         # Plot B_true, if so specified
+    #         if B_true is not None:
+    #             plt.axvline(
+    #                 B_true[i,j],
+    #                 color='red',
+    #                 linestyle='--'
+    #             )
+
+    #         # Save figure, if so specified
+    #         if save_dir is not None:
+    #             fig.savefig(
+    #                 str(
+    #                     (save_dir / '{}.png'.format(save_name + '_{}{}'.format(i+1,j+1) if save_name is not None else 'mmse_coeffs'))
+    #                 ),
+    #                 # bbox_inches='tight'
+    #             )
+
+    #     # Calculate statistics, if so specified
+    #     if return_stats:
+    #         stats_df = plot_df.groupby(
+    #             by='test_case',
+    #             as_index=False
+    #         ).agg(
+    #             b11_mean=('b11', 'mean'),
+    #             b12_mean=('b12', 'mean'),
+    #             b21_mean=('b21', 'mean'),
+    #             b22_mean=('b22', 'mean'),
+    #             b11_std=('b11', 'std'),
+    #             b12_std=('b12', 'std'),
+    #             b21_std=('b21', 'std'),
+    #             b22_std=('b22', 'std')
+    #         )
+    #         return stats_df
+
+
+    @classmethod
+    def plot_test_cases_map_coefficient_estimates(
+        cls,
+        parser,
+        test_cases=None,
+        B_true=None,
+        bin_cfg='auto',
+        return_stats=True,
+        save_dir=None,
+        save_name=None,
+        label_size=20,
+        legend_size=20
+        # u_range=(-0.3, 0.3),
+        # v_range=(-0.3, 0.3),
+
+    ):
+        
+        plt.rc(
+            'legend',
+            fontsize=legend_size,
+            title_fontsize=legend_size
+        )
+
+        # Filter out desired test cases, if so specified
+        parsed_results = parser.parsed_results
+        
+        if test_cases is not None:
+            parsed_results = {
+                k: v for k, v in parser.parsed_results.items() if k in test_cases
+            }
+    
+        # Create dataframe for plotting
+        plot_df = pd.DataFrame()
+        for test_case, test_case_results in parsed_results.items():
+
+            # Append dataframe
+            plot_df = pd.concat(
+                [
+                    plot_df,
+                    pd.DataFrame(
+                        data={
+                            'test_case': [test_case]*len(test_case_results['map']['estimates']),
+                            'b11': test_case_results['map']['b11_estimates'],
+                            'b12': test_case_results['map']['b12_estimates'],
+                            'b21': test_case_results['map']['b21_estimates'],
+                            'b22': test_case_results['map']['b22_estimates'],
+                        }
+                    )
+                ],
+                axis=0
+            ).reset_index(
+                drop=True
+            )
+    
+        # Create plot
+        fig, axs = plt.subplots(
+            nrows=2, ncols=2,
+            figsize=(20,15)
+        )
+
+        # fig.suptitle(
+        #     'Casos de teste: {}'.format(', '.join(test_cases)),
+        #     fontsize=25
+        # )
+
+        # Plot B_true, if so specified
+        if B_true is not None:
+            for i,j in np.ndindex(B_true.shape):
+                axs[i,j].axvline(
+                    B_true[i,j],
+                    color='red',
+                    linestyle='--'
+                )
+
+        # B11
+        sns.histplot(
+            data=plot_df.rename(columns={'test_case': 'Caso de Teste'}),
+            x='b11',
+            hue='Caso de Teste',
+            hue_order=test_cases,
+            bins=bin_cfg,
+            ax=axs[0,0]
+        )
+        axs[0,0].set_ylabel('Contagem de Realizações',fontsize=label_size)
+        axs[0,0].set_xlabel(r'$\widehat{b}_{11}^{MAP}$',fontsize=label_size)
+        axs[0,0].tick_params(
+            axis='both',
+            labelsize=label_size
+        )
+
+        # B12
+        sns.histplot(
+            data=plot_df.rename(columns={'test_case': 'Caso de Teste'}),
+            x='b12',
+            hue='Caso de Teste',
+            hue_order=test_cases,
+            bins=bin_cfg,
+            ax=axs[0,1]
+        )
+        axs[0,1].set_ylabel('Contagem de Realizações',fontsize=label_size)
+        axs[0,1].set_xlabel(r'$\widehat{b}_{12}^{MAP}$',fontsize=label_size)
+        axs[0,1].tick_params(
+            axis='both',
+            labelsize=label_size
+        )
+
+        # B21
+        sns.histplot(
+            data=plot_df.rename(columns={'test_case': 'Caso de Teste'}),
+            x='b21',
+            hue='Caso de Teste',
+            hue_order=test_cases,
+            bins=bin_cfg,
+            ax=axs[1,0]
+        )
+        axs[1,0].set_ylabel('Contagem de Realizações',fontsize=label_size)
+        axs[1,0].set_xlabel(r'$\widehat{b}_{21}^{MAP}$',fontsize=label_size)
+        axs[1,0].tick_params(
+            axis='both',
+            labelsize=label_size
+        )
+
+        # B22
+        sns.histplot(
+            data=plot_df.rename(columns={'test_case': 'Caso de Teste'}),
+            x='b22',
+            hue='Caso de Teste',
+            hue_order=test_cases,
+            bins=bin_cfg,
+            ax=axs[1,1]
+        )
+        axs[1,1].set_ylabel('Contagem de Realizações',fontsize=label_size)
+        axs[1,1].set_xlabel(r'$\widehat{b}_{22}^{MAP}$',fontsize=label_size)
+        axs[1,1].tick_params(
+            axis='both',
+            labelsize=label_size
+        )
+
+        # Save figure, if so specified
+        if save_dir is not None:
+            fig.savefig(
+                str(
+                    (save_dir / '{}.png'.format(save_name if save_name is not None else 'map_coeffs'))
+                ),
+                bbox_inches='tight'
+            )
+
+        # Calculate statistics, if so specified
+        if return_stats:
+            stats_df = plot_df.groupby(
+                by='test_case',
+                as_index=False
+            ).agg(
+                b11_mean=('b11', 'mean'),
+                b12_mean=('b12', 'mean'),
+                b21_mean=('b21', 'mean'),
+                b22_mean=('b22', 'mean'),
+                b11_std=('b11', 'std'),
+                b12_std=('b12', 'std'),
+                b21_std=('b21', 'std'),
+                b22_std=('b22', 'std')
+            )
+            return stats_df
+
+
+
+    @classmethod
+    def plot_test_cases_map_errors(
+        cls,
+        parser,
+        test_cases=None,
+        bin_cfg='fd',
+        return_stats=True,
+        save_dir=None,
+        save_name=None,
+        label_size=20,
+        legend_size=20
+    ):
+        # Filter out desired test cases, if so specified
+        parsed_results = parser.parsed_results
+        
+        if test_cases is not None:
+            parsed_results = {
+                k: v for k, v in parser.parsed_results.items() if k in test_cases
+            }
+    
+        # Create dataframe for plotting
+        plot_df = pd.DataFrame()
+        for test_case, test_case_results in parsed_results.items():
+    
+            # Append dataframe
+            plot_df = pd.concat(
+                [
+                    plot_df,
+                    pd.DataFrame(
+                        data={
+                            'test_case': [test_case]*len(test_case_results['posteriori_grid']['maximums']),
+                            'errors': test_case_results['map']['errors']
+                        }
+                    )
+                ],
+                axis=0
+            ).reset_index(
+                drop=True
+            )
+    
+        # Create plot
+        fig = plt.figure(figsize=(20,10))
+        ax = sns.histplot(
+            data=plot_df.rename(
+                columns={
+                    'test_case': 'Caso de Teste'
+                }
+            ),
+            x='errors',
+            hue='Caso de Teste',
+            bins=bin_cfg
+        )
+        
+        plt.ylabel('Contagem de Realizações', fontsize=label_size)
+        plt.xlabel(r'$\delta_{\bf{B}}({\bf{B}})$', fontsize=label_size)
+        plt.xticks(fontsize=label_size)
+        plt.yticks(fontsize=label_size)
+        plt.setp(
+            ax.get_legend().get_texts(),
+            fontsize=legend_size
+        )
+        plt.setp(
+            ax.get_legend().get_title(),
+            fontsize=legend_size
+        )
+
+        # Save figure, if so specified
+        if save_dir is not None:
+            fig.savefig(
+                str(
+                    (save_dir / '{}.png'.format(save_name if save_name is not None else 'map_errors'))
+                ),
+                # bbox_inches='tight'
+            )
 
         # Calculate statistics, if so specified
         if return_stats:

@@ -19,6 +19,7 @@ class BayesianEstimators:
         learning_rate_grad_asc,
         stopping_thresh_grad_asc,
         max_it_grad_asc,
+        stopping_criterion_persistance_its_grad_asc,
         is_natural_gradient_grad_asc=False
     ):
 
@@ -36,6 +37,7 @@ class BayesianEstimators:
             'learning_rate': learning_rate_grad_asc,
             'thresh': stopping_thresh_grad_asc,
             'max_it': max_it_grad_asc,
+            'stopping_criterion_persistance_its': stopping_criterion_persistance_its_grad_asc,
             'source_pdf': source_pdf,
             'source_pdf_derivative': source_pdf_derivative,
             'prior_pdf': prior_pdf,
@@ -79,6 +81,7 @@ class BayesianEstimators:
             learning_rate=map_configs['learning_rate'],
             thresh=map_configs['thresh'],
             max_it=map_configs['max_it'],
+            stopping_criterion_persistance_its=map_configs['stopping_criterion_persistance_its'],
             source_pdf=map_configs['source_pdf'],
             source_pdf_derivative=map_configs['source_pdf_derivative'],
             prior_pdf=map_configs['prior_pdf'],
@@ -105,6 +108,7 @@ class MAPGradientAscentEstimator:
         learning_rate: float,
         thresh: float,
         max_it: int,
+        stopping_criterion_persistance_its: int,
         source_pdf,
         source_pdf_derivative,
         prior_pdf,
@@ -115,6 +119,7 @@ class MAPGradientAscentEstimator:
         self.learning_rate=learning_rate
         self.thresh=thresh
         self.max_it=max_it
+        self.stopping_criterion_persistance_its=stopping_criterion_persistance_its
         self.is_natural_gradient=is_natural_gradient
         self.source_pdf=source_pdf
         self.source_pdf_derivative=source_pdf_derivative
@@ -141,6 +146,7 @@ class MAPGradientAscentEstimator:
             learning_rate,
             thresh,
             max_it,
+            stopping_criterion_persistance_its,
             is_natural_gradient,
             s,
             x,
@@ -159,6 +165,7 @@ class MAPGradientAscentEstimator:
             continue_opt=True
             n=1
             last_posteriori = -np.inf
+            non_increasing_iterations=0
             # print('-'*100)
             while continue_opt:
                 
@@ -204,6 +211,7 @@ class MAPGradientAscentEstimator:
                                 'iteration': [n+1],
                                 'detB': [np.linalg.det(B)],
                                 'log_posterior': [posteriori],
+                                'B': [B],
                                 'gradient': [deltaB]
                             }
                         )
@@ -217,7 +225,31 @@ class MAPGradientAscentEstimator:
                     last_posteriori=posteriori
                 else:
                     n+=1
-                    continue_opt = (n<max_it) and (np.abs(posteriori-last_posteriori) > thresh)
+                    # B_increment = learning_rate * np.sqrt(
+                    #     np.sum(
+                    #         np.square(deltaB)
+                    #     )
+                    # )
+                    # Verify magnitude of increment to B
+                    # if (
+                    #     B_increment/np.square(NSOURCES)
+                    # ) < thresh:
+                        
+                    #     non_increasing_iterations += 1
+                    # else:
+                    #     non_increasing_iterations = 0
+
+                    if (
+                        posteriori-last_posteriori < thresh
+                    ):
+                        non_increasing_iterations += 1
+                    else:
+                        non_increasing_iterations = 0
+
+                    # Stopping criterion
+                    # continue_opt = (n<max_it) and (non_increasing_iterations < stopping_criterion_persistance_its)
+
+                    continue_opt = (n<max_it) and (non_increasing_iterations < stopping_criterion_persistance_its)
                     last_posteriori=posteriori
 
             return np.array(B), logs
@@ -267,6 +299,7 @@ class MAPGradientAscentEstimator:
             self.learning_rate,
             self.thresh,
             self.max_it,
+            self.stopping_criterion_persistance_its,
             self.is_natural_gradient,
             s,
             x
