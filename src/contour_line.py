@@ -2,6 +2,9 @@ import numpy as np
 import itertools
 from functools import partial
 import pathos
+from .utilities import PosteriorUtilities
+import jax
+import jax.numpy as jnp
 
 
 class PosteriorContourLines:
@@ -26,51 +29,10 @@ class PosteriorContourLines:
         )
 
         self.normalize_posterior=normalize_posterior
-        self.log_posterior_fn = self.__get_log_posterior_fn(
+        self.log_posterior_fn = PosteriorUtilities.get_log_posterior_fn(
             source_pdf_fn=source_pdf_fn,
             prior_pdf_fn=prior_pdf_fn,
-            normalize_posterior=normalize_posterior
-        )
-
-        
-        
-
-    def __get_log_posterior_fn(
-        self,
-        source_pdf_fn,
-        prior_pdf_fn,
-        normalize_posterior
-    ):
-        """
-            This method returns a method for calculating log-posterior inside MCMC.
-        """
-        def __log_posterior_fn(
-            x,
-            B,
-            source_pdf_fn,
-            prior_pdf_fn,
-            normalize_posterior
-        ):
-            NOBS=x.shape[-1]
-            
-            # Cálculo de posteriori para registros
-            posteriori = NOBS*np.log(np.abs(np.linalg.det(B)))
-            y=B@x
-            for i, j in np.ndindex(x.shape):
-                posteriori += np.log(source_pdf_fn(y[i,j]))
-            posteriori += np.log(prior_pdf_fn(B))
-
-            if normalize_posterior:
-                posteriori = posteriori/NOBS
-        
-            return posteriori
-
-        return lambda x, B: __log_posterior_fn(
-            x=x,
-            B=B,
-            source_pdf_fn=source_pdf_fn,
-            prior_pdf_fn=prior_pdf_fn,
-            normalize_posterior=normalize_posterior
+            use_jax=True
         )
         
     def __get_evaluation_grid(
@@ -99,11 +61,8 @@ class PosteriorContourLines:
         N,
         njobs=1
     ):
-        
-        def __get_posteriori(
-            A,
-            x,
-            N,
+        def __get_grid_matrices(
+            B_true,
             idx_info
         ):
             # Parse index info
@@ -111,55 +70,22 @@ class PosteriorContourLines:
             j, v = idx_info[-1]
 
             # Get shifted value of A which will be evaluated and corresponding value of B
-            # A_shifted = A + u*symmetric_basis + v*skew_symmetric_basis
-            u_matrix = np.array([
-                [np.cosh(u), np.sinh(u)],
-                [np.sinh(u), np.cosh(u)]
-            ])
+            B = B_true + u*symmetric_basis + v*skew_symmetric_basis
 
-            v_matrix = np.array([
-                [np.cos(v), -np.sin(v)],
-                [np.sin(v), np.cos(v)]
-            ])
-            shift_matrix = u_matrix@v_matrix
-            # import pdb;pdb.set_trace()
-            # A_shifted = A*u_matrix*v_matrix
-            
-            # B = np.linalg.inv(A)@(np.eye(2) + u*symmetric_basis + v*skew_symmetric_basis)
-            B = np.linalg.inv(A) + u*symmetric_basis + v*skew_symmetric_basis
-
-            # # Initialize likelihood with part that does not depend on observation
-            # likelihood = np.log(np.abs(np.linalg.det(B)))
-
-            # # Iterator over sample and observation position
-            # likelihood_iterator = [
-            #     (t,i) for t,i in itertools.product(
-            #         range(x.shape[-1]),
-            #         range(x.shape[0]))
-            # ]
-
-            # # Get source estimate from value of B
-            # s_est = B@x
-
-            # # Get part of likelihood that depends on observation
-            # likelihood += (1/N)*np.sum([
-            #     np.log(source_pdf_fn(s_est[i,t])) for t,i in likelihood_iterator
-            # ])
-
-            # # Evaluate prior
-            # prior = np.log(prior_pdf_fn(B))/N
-
-            # Get posterior value at B
-            posteriori = self.log_posterior_fn(
-                x=x,
-                B=B
-            )
-            
             return {
                 'i': i,
                 'j': j,
-                'log_posteriori': posteriori
+                'B': B
             }
+            
+        
+        def __get_posteriori_fn(
+            x,
+        ):  
+            return lambda B: self.log_posterior_fn(
+                        x=x,
+                        B=B
+                    )
             
 
         # Get basis for symmetric space
@@ -181,21 +107,45 @@ class PosteriorContourLines:
             enumerate(self.v_vec)
         )
 
-        # Wrapper function which will be used
-        exec_fn = partial(
-            __get_posteriori,
-            A,
-            x,
-            N
-        )
+        # Get grid matrices
+        matrices_dicts = [
+            __get_grid_matrices(
+                B_true = np.linalg.inv(A),
+                idx_info=idx_info
+            ) for idx_info in iterator
+        ]
+        matrix_idxs = jnp.asarray([
+            (d['i'], d['j']) for d in matrices_dicts
+        ])
+        B_matrices = jnp.asarray([
+            d['B'] for d in matrices_dicts
+        ])
+
+        # Wrapper function which will be used on matrices
+        # exec_fn = partial(
+        #     self.log_posterior_fn,
+        #     x
+        # )
+
+        
         
         # Execute posteriori calculations
         # with pathos.multiprocessing.ProcessingPool(njobs) as p:
         #     results = p.map(exec_fn, iterator)
-        results = []
-        for idx in iterator:
-            results.append(exec_fn(idx))
+        # results = []
+        # for idx in iterator:
+        #     results.append(exec_fn(idx))
 
+        # Evaluate posteriors on grid using vectorized jax.vmap call
+        exec_map = jax.vmap(
+            partial(
+                self.log_posterior_fn,
+                x
+            ),
+            in_axes=0
+        )
+        results = exec_map(B_matrices)
+        
         # Parse results
         z = np.empty(
             shape=(
@@ -203,10 +153,13 @@ class PosteriorContourLines:
                 self.v_vec.shape[0]
             )
         )
-        for r in results:
-            i=r['i']
-            j=r['j']
-            z[i, j]=r['log_posteriori']
+        for idxs, r in zip(
+            matrix_idxs,
+            results
+        ):
+            i=idxs[0]
+            j=idxs[-1]
+            z[i, j]=r
 
         # Save posterior grid
         self.posterior_grid = z
