@@ -1,10 +1,93 @@
 import pandas as pd
 import numpy as np
+import jax.numpy as jnp
 
 import plotly.graph_objects as go
 from matplotlib import pyplot as plt
 import seaborn as sns
-sns.set()
+
+class PosteriorUtilities:
+
+    @staticmethod
+    def get_log_posterior_fn(
+        source_pdf_fn,
+        prior_pdf_fn,
+        use_jax=False
+    ):
+        """
+            This method returns a method for calculating log-posterior inside MCMC, with the option of using a jax
+            backend or not.
+        """
+        if not use_jax:
+            def __log_posterior_fn(
+                x,
+                B,
+                source_pdf_fn,
+                prior_pdf_fn
+            ):
+                NOBS=x.shape[-1]
+                # Cálculo de posteriori para registros
+                priori = prior_pdf_fn(B)
+                if priori > 0:
+                    posteriori = NOBS*np.log(np.abs(np.linalg.det(B))) + np.log(priori)
+                    y=B@x
+                    iterator = np.ndindex(x.shape)
+                    posteriori += np.sum(np.log(
+                        np.array([
+                            source_pdf_fn(y[i,j]) for i,j in iterator
+                        ])
+                    ))
+                elif priori == 0:
+                    posteriori = -np.inf
+                else:
+                    print(priori)
+                    print(B)
+                    print(prior_pdf_fn)
+                    raise ValueError('Prior value must be non-negative.')
+                return posteriori
+
+            return lambda x, B: __log_posterior_fn(
+                x=x,
+                B=B,
+                source_pdf_fn=source_pdf_fn,
+                prior_pdf_fn=prior_pdf_fn
+            )
+        else:
+            def __log_posterior_fn(
+                x,
+                B,
+                source_pdf_fn,
+                prior_pdf_fn
+            ):
+                x = jnp.asarray(x)
+                B = jnp.asarray(B)
+
+                NOBS=x.shape[-1]
+                # Avaliar priori
+                priori = prior_pdf_fn(B)
+                # Avaliar determinante
+                sign, logabsdet = jnp.linalg.slogdet(B)
+                # y = B@x
+                y=jnp.matmul(B,x)
+                # Avaliar somatório
+                log_source = jnp.sum(jnp.log(source_pdf_fn(y)))
+                log_lik = NOBS*logabsdet + log_source
+                # Log-priori segura: o duplo `where` impede gradientes NaN vindos de
+                # log(0), pois o JAX avalia os dois ramos antes de selecionar.
+                safe_priori = jnp.where(priori > 0, priori, 1.0)
+                log_prior = jnp.where(priori > 0, jnp.log(safe_priori), -jnp.inf)
+                posteriori = jnp.where(priori > 0, log_lik + log_prior, -jnp.inf)
+
+                return posteriori
+
+            return lambda x, B: __log_posterior_fn(
+                x=x,
+                B=B,
+                source_pdf_fn=source_pdf_fn,
+                prior_pdf_fn=prior_pdf_fn
+            )
+
+
 
 class SignalGraphPlotter:
 
