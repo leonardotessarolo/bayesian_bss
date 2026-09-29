@@ -2,7 +2,10 @@ import numpy as np
 import math
 import scipy.stats as st
 from scipy.special import gamma
+
+from jax.scipy.special import betainc
 import jax.numpy as jnp
+import jax.scipy.stats as jst
 
 class LogisticSource:
     def __init__(
@@ -14,10 +17,6 @@ class LogisticSource:
         # Save attributes
         self.mu=mu
         self.sigma=sigma
-        # Backend toggle. Standard-Python path keeps the original SCALAR pdf
-        # (evaluated element-by-element). JAX path returns an ELEMENTWISE pdf that
-        # can be applied to the whole (nsources, nobs) array at once and is
-        # differentiable / jit-traceable.
         self.use_jax=use_jax
 
     def get(
@@ -81,7 +80,6 @@ class LogisticSource:
                     This method takes value x and return SCALAR source pdf derivative evaluated at x.
                 """
                 # Calculate repeated subexpressions
-                import pdb; pdb.set_trace()
                 arg1 = jnp.exp(
                     -(x-self.mu)/self.sigma
                 )
@@ -91,7 +89,6 @@ class LogisticSource:
                 )/(
                     (self.sigma*self.sigma)*(arg2*arg2*arg2*arg2)
                 )
-            print('----')
             return lambda x: jnp.vectorize(__logistic_distribution_derivative(x=x))
         
 
@@ -232,69 +229,207 @@ class StandardLogisticSource:
         )
 
     
+# class StudentTSource:
+#     def __init__(
+#         self,
+#         mu,
+#         sigma,
+#         df
+#     ):
+#         # Save attributes
+#         self.mu=mu
+#         self.sigma=sigma
+#         self.df=df
+
+#     def get(
+#         self
+#     ):
+            
+#         return lambda x: st.t.pdf(
+#             x=x,
+#             df=self.df,
+#             loc=self.mu,
+#             scale=self.sigma
+#         )
+
+# class StudentTSource:
+#     def __init__(
+#         self,
+#         mu,
+#         sigma,
+#         df
+#     ):
+#         # Save attributes
+#         self.mu=mu
+#         self.sigma=sigma
+#         self.df=df
+
+#     def get(
+#         self
+#     ):
+            
+#         return lambda x: st.t.pdf(
+#             x=x,
+#             df=self.df,
+#             loc=self.mu,
+#             scale=self.sigma
+#         )
+
+
+#     def get_derivative(
+#         self
+#     ):
+#         def __t_distribution_derivative(
+#             x
+#         ):
+#             """
+#                 This method takes SCALAR value x and return SCALAR source pdf derivative evaluated at x.
+#             """
+
+#             # Calculate repeated subexpression
+#             arg1 = (x-self.mu)/(self.df*self.sigma)
+            
+#             # Calculate multiplicative parameter
+#             mult = gamma((self.df+1)/2)/(gamma(self.df/2)*math.sqrt(math.pi*self.df*self.sigma*self.sigma))
+#             mult = mult*0.5*(-self.df-1)
+
+#             # Calculate power parameter
+#             p = math.pow(
+#                 1+arg1*arg1*self.df,
+#                 (-self.df-3)/2
+#             )*2*arg1/self.sigma
+
+#             return mult * p
+
+#         return lambda x: __t_distribution_derivative(x=x)
+
+#     def get_cumulative(
+#         self
+#     ):
+            
+#         return lambda x: st.t.cdf(
+#             x=x,
+#             df=self.df,
+#             loc=self.mu,
+#             scale=self.sigma
+#         )
+    
+    
+#     def get_realization(
+#         self,
+#         nsources,
+#         nobs,
+#         seed=None
+#     ):
+#         return st.t.rvs(
+#             df=self.df,
+#             loc=self.mu,
+#             scale=self.sigma,
+#             size=(nsources, nobs),
+#             random_state=seed
+#         )
+
 class StudentTSource:
     def __init__(
         self,
         mu,
         sigma,
-        df
+        df,
+        use_jax=False
     ):
         # Save attributes
         self.mu=mu
         self.sigma=sigma
         self.df=df
+        self.use_jax=use_jax
 
     def get(
         self
     ):
-            
-        return lambda x: st.t.pdf(
-            x=x,
-            df=self.df,
-            loc=self.mu,
-            scale=self.sigma
-        )
-
+        if not self.use_jax:
+            def __t_distribution(
+                x
+            ):
+                return st.t.pdf(
+                    x=x,
+                    df=self.df,
+                    loc=self.mu,
+                    scale=self.sigma
+                )
+            return lambda x: __t_distribution(x=x)
+        else:
+            def __t_distribution(
+                x
+            ):
+                return jst.t.pdf(
+                    x,
+                    self.df,
+                    loc=self.mu,
+                    scale=self.sigma
+                )
+            return lambda x: __t_distribution(x=x)
 
     def get_derivative(
         self
     ):
-        def __t_distribution_derivative(
-            x
-        ):
-            """
-                This method takes SCALAR value x and return SCALAR source pdf derivative evaluated at x.
-            """
-
-            # Calculate repeated subexpression
-            arg1 = (x-self.mu)/(self.df*self.sigma)
-            
-            # Calculate multiplicative parameter
-            mult = gamma((self.df+1)/2)/(gamma(self.df/2)*math.sqrt(math.pi*self.df*self.sigma*self.sigma))
-            mult = mult*0.5*(-self.df-1)
-
-            # Calculate power parameter
-            p = math.pow(
-                1+arg1*arg1*self.df,
-                (-self.df-3)/2
-            )*2*arg1/self.sigma
-
-            return mult * p
-
-        return lambda x: __t_distribution_derivative(x=x)
+        if not self.use_jax:
+            def __t_distribution_derivative(
+                x
+            ):
+                # Analytical identity: f'(x) = f(x) * d log(f(x))/dx.
+                diff = x-self.mu
+                score = -(self.df+1)*diff/(
+                    self.df*self.sigma*self.sigma + diff*diff
+                )
+                return self.get()(x=x)*score
+            return lambda x: __t_distribution_derivative(x=x)
+        else:
+            def __t_distribution_derivative(
+                x
+            ):
+                # Elementwise analytical derivative using only JAX operations.
+                diff = x-self.mu
+                score = -(self.df+1)*diff/(
+                    self.df*self.sigma*self.sigma + jnp.square(diff)
+                )
+                return self.get()(x=x)*score
+            return lambda x: __t_distribution_derivative(x=x)
 
     def get_cumulative(
         self
     ):
-            
-        return lambda x: st.t.cdf(
-            x=x,
-            df=self.df,
-            loc=self.mu,
-            scale=self.sigma
-        )
-    
-    
+        if not self.use_jax:
+            def __t_distribution_cumulative(
+                x
+            ):
+                return st.t.cdf(
+                    x=x,
+                    df=self.df,
+                    loc=self.mu,
+                    scale=self.sigma
+                )
+            return lambda x: __t_distribution_cumulative(x=x)
+        else:
+            def __t_distribution_cumulative(
+                x
+            ):
+                # Student-t CDF via the regularized incomplete-beta identity.
+                z = (x-self.mu)/self.sigma
+                beta_arg = self.df/(
+                    self.df+jnp.square(z)
+                )
+                tail = 0.5*betainc(
+                    self.df/2,
+                    0.5,
+                    beta_arg
+                )
+                return jnp.where(
+                    z < 0,
+                    tail,
+                    1-tail
+                )
+            return lambda x: __t_distribution_cumulative(x=x)
+
     def get_realization(
         self,
         nsources,
@@ -308,7 +443,8 @@ class StudentTSource:
             size=(nsources, nobs),
             random_state=seed
         )
-    
+
+
 
 class TriangularSource:
     def __init__(

@@ -63,15 +63,23 @@ class PosteriorUtilities:
                 B = jnp.asarray(B)
 
                 NOBS=x.shape[-1]
+
                 # Avaliar priori
-                priori = prior_pdf_fn(B)
+                try:
+                    priori = prior_pdf_fn(B)
+                except Exception as e:
+                    import pdb; pdb.set_trace()
+                
                 # Avaliar determinante
                 sign, logabsdet = jnp.linalg.slogdet(B)
+                
                 # y = B@x
                 y=jnp.matmul(B,x)
+                
                 # Avaliar somatório
                 log_source = jnp.sum(jnp.log(source_pdf_fn(y)))
                 log_lik = NOBS*logabsdet + log_source
+                
                 # Log-priori segura: o duplo `where` impede gradientes NaN vindos de
                 # log(0), pois o JAX avalia os dois ramos antes de selecionar.
                 safe_priori = jnp.where(priori > 0, priori, 1.0)
