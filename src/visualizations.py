@@ -1,101 +1,991 @@
 import pandas as pd
 import numpy as np
-import jax.numpy as jnp
-
-import plotly.graph_objects as go
-from matplotlib import pyplot as plt
+import matplotlib.pyplot as plt
 import seaborn as sns
 
-class PosteriorUtilities:
+class VisualizationUtilities:
+    @staticmethod
+    def plot_test_cases_contours(
+        parser,
+        test_cases=None,
+        u_range=(-0.3, 0.3),
+        v_range=(-0.3, 0.3),
+        equal_aspect=False,
+        marker_size=40,
+        return_stats=True,
+        save_dir=None,
+        save_name=None,
+        label_size=20,
+        legend_size=20,
+        transparency=0.2,
+        legend_location=None
+    ):
+            
+        plt.rcParams['axes.facecolor'] = 'white'
+        plt.rcParams['savefig.facecolor'] = 'white'
+        plt.rcParams['axes.grid'] = True
+        plt.rcParams['grid.color'] = 'lightgray'
+        plt.rcParams['grid.linestyle'] = '--'
+        plt.rcParams['grid.linewidth'] = 0.5
+
+
+        # Filter out desired test cases, if so specified
+        parsed_results = parser.parsed_results
+
+        if test_cases is not None:
+            parsed_results = {
+                k: v for k, v in parser.parsed_results.items() if k in test_cases
+            }
+
+        # Create dataframe for plotting
+        plot_df = pd.DataFrame()
+        for test_case, test_case_results in parsed_results.items():
+            # Retrieve u coordinate for maximums
+            u_vec = [
+                u for u,v in test_case_results['posteriori_grid']['maximums']
+            ]
+
+            # Retrieve v coordinate for maximums
+            v_vec = [
+                v for u,v in test_case_results['posteriori_grid']['maximums']
+            ]
+
+            # Append dataframe
+            plot_df = pd.concat(
+                [
+                    plot_df,
+                    pd.DataFrame(
+                        data={
+                            'test_case': [test_case]*len(test_case_results['posteriori_grid']['maximums']),
+                            'u': u_vec,
+                            'v': v_vec
+                        }
+                    )
+                ],
+                axis=0
+            ).reset_index(
+                drop=True
+            )
+
+        # Get stats
+        stats_df = plot_df.groupby(
+            by='test_case',
+            as_index=False
+        ).agg(
+            u_mean=('u', 'mean'),
+            v_mean=('v', 'mean'),
+            u_std=('u', 'std'),
+            v_std=('v', 'std')
+        )
+
+
+        # Create plot
+        fig, ax = plt.subplots(
+            nrows=1, ncols=1,
+            figsize=(20,7)
+        )
+        if equal_aspect:
+            ax.set_aspect('equal')
+
+        sns.scatterplot(
+            data=plot_df.rename(
+                columns={
+                    'test_case': 'Caso de Teste'
+                }
+            ),
+            x='u',
+            y='v',
+            hue='Caso de Teste',
+            style='Caso de Teste',
+            alpha=transparency,
+            markers = ['s', '>', '<','o'],
+            legend=False,
+            **{
+                's': marker_size
+            }
+        )
+        sns.scatterplot(
+            data=stats_df.rename(
+                columns={
+                    'test_case': 'Caso de Teste',
+                    'u_mean': 'u',
+                    'v_mean':'v'
+                }
+            ),
+            x='u',
+            y='v',
+            hue='Caso de Teste',
+            style='Caso de Teste',
+            markers = ['s', '>', '<','o'],
+            **{
+                's': 3*marker_size
+            }
+        )
+
+        for spine in ['bottom', 'top', 'left', 'right']:
+            ax.spines[spine].set_color('black')
+
+        if legend_location is not None:
+            sns.move_legend(ax, legend_location)
+        
+        plt.xlim(u_range)
+        plt.ylim(v_range)
+        plt.ylabel('v',fontsize=label_size)
+        plt.xlabel('u', fontsize=label_size)
+        plt.xticks(fontsize=label_size)
+        plt.yticks(fontsize=label_size)
+        
+        plt.setp(
+            ax.get_legend().get_texts(),
+            fontsize=legend_size
+        )
+        plt.setp(
+            ax.get_legend().get_title(),
+            fontsize=legend_size
+        )
+        
+
+        # Save figure, if so specified
+        if save_dir is not None:
+            fig.savefig(
+                str(
+                    (save_dir / '{}.png'.format(save_name if save_name is not None else 'contours'))
+                ),
+                bbox_inches='tight'
+            )
+
+        # Calculate statistics, if so specified
+        if return_stats:
+            return stats_df
+        
+    @staticmethod
+    def plot_recovery_errors(
+        parser,
+        error_type,
+        estimate_type,
+        test_cases=None,
+        return_stats=True,
+        whis_lims=(5,95),
+        box_color='gray',
+        save_dir=None,
+        save_name=None,
+        label_size=20,
+        legend_size=20,
+    ):
+            
+        plt.rc(
+            'legend',
+            fontsize=legend_size,
+            title_fontsize=legend_size
+        )
+
+        plt.rcParams['axes.facecolor'] = 'white'
+        plt.rcParams['savefig.facecolor'] = 'white'
+
+        plt.rc('axes', labelsize=label_size)
+        plt.rc('xtick', labelsize=label_size)
+        plt.rc('ytick', labelsize=label_size)
+
+        # Filter out desired test cases, if so specified
+        parsed_results = parser.parsed_results
+        
+        if test_cases is not None:
+            parsed_results = {
+                k: v for k, v in parser.parsed_results.items() if k in test_cases
+            }
+
+        # Create dataframe for plotting
+        plot_df = pd.DataFrame()
+        for test_case, test_case_results in parsed_results.items():
+
+            # Create estimate dataframe
+            plot_df = pd.concat(
+                [
+                    plot_df,
+                    pd.DataFrame(
+                        data={
+                            'estimate_type': [estimate_type]*len(parser.finished_realizations),
+                            'test_case': [test_case]*len(parser.finished_realizations),
+                            error_type: test_case_results[estimate_type][error_type]
+                        }
+                    )
+                ],
+                axis=0
+            ).reset_index(
+                drop=True
+            )
+
+
+        # Calculate stats_df
+        stats_df = plot_df.groupby(
+            by=['estimate_type','test_case'],
+            as_index=False
+        ).agg(
+            error_mean=(error_type, 'mean'),
+            error_std=(error_type, 'std')
+        )
+
+        # Create plot
+        fig, ax = plt.subplots(
+            nrows=1, ncols=1,
+            figsize=(20,5)
+        )
+
+        
+
+        # Plot horizontal line at 0
+        ax.axhline(
+            0,
+            color='lightgray',
+            linestyle='--'
+        )
+
+        sns.boxplot(
+            data=plot_df.rename(
+                columns={'estimate_type': 'Tipo de Estimativa'}
+            ),
+            x='test_case',
+            y=error_type,
+            color=box_color,
+            whis=whis_lims,
+            width=.7,
+            showfliers=False,
+            ax=ax
+        )
+        ax.set_ylabel(
+            r'$\delta_{\bf{S}}(\widehat{\bf{S}})$'
+        )
+        for spine in ['bottom', 'top', 'left', 'right']:
+            ax.spines[spine].set_color('black')
+        
+        ax.set_xlabel(
+            'Caso de Teste'
+        )
+        
+        
+        # Plot vertical lines
+        [
+            ax.axvline(
+                x+.5,
+                color='lightgray',
+                linestyle='--'
+            ) for x in ax.get_xticks()
+        ]
+
+            
+        
+        # Save figure, if so specified
+        if save_dir is not None:
+            fig.savefig(
+                str(
+                    (save_dir / '{}.png'.format(save_name if save_name is not None else 'delta_{}_boxplots_{}'.format(error_type, estimate_type)))
+                ),
+                bbox_inches='tight'
+            )
+            
+        # Calculate statistics, if so specified
+        if return_stats:
+            return stats_df
+    
+    @staticmethod
+    def mcmc_diagnostics_analysis(
+        parser,
+        test_cases=None,
+        return_stats=True,
+        whis_lims=(5,95),
+        box_color='gray',
+        log_scale=False,
+        save_dir=None,
+        save_name=None,
+        label_size=20,
+        legend_size=20,
+    ):
+        def __get_diagnostic(
+            diag,
+            test_case,
+            test_case_results
+        ):
+            diag_columns = [
+                c for c in test_case_results['mmse']['diagnostics'][0].columns if diag in c
+            ]
+            test_case_diagnostics = pd.DataFrame([
+                {
+                    c: df.iloc[-1,:][c] for c in diag_columns
+                } for df in test_case_results['mmse']['diagnostics']
+            ]).melt(
+                value_vars=diag_columns,
+                var_name='coefficient',
+                value_name=diag
+            )
+            test_case_diagnostics['test_case'] = test_case
+            test_case_diagnostics['coefficient'] = test_case_diagnostics['coefficient'].str.slice(-4)
+            test_case_diagnostics = test_case_diagnostics[[
+                'test_case', 'coefficient', diag
+            ]]
+
+            print(test_case_diagnostics)
+
+            return test_case_diagnostics
+            
+        plt.rc(
+            'legend',
+            fontsize=legend_size,
+            title_fontsize=legend_size
+        )
+
+        plt.rcParams['axes.facecolor'] = 'white'
+        plt.rcParams['savefig.facecolor'] = 'white'
+
+        plt.rc('axes', labelsize=label_size)
+        plt.rc('xtick', labelsize=label_size)
+        plt.rc('ytick', labelsize=label_size)
+
+        # Filter out desired test cases, if so specified
+        parsed_results = parser.parsed_results
+        
+        if test_cases is not None:
+            parsed_results = {
+                k: v for k, v in parser.parsed_results.items() if k in test_cases
+            }
+        
+        # Loop over test cases and extract last R-hat/ESS value
+        plot_df = pd.DataFrame()
+        for test_case, test_case_results in parsed_results.items():
+            # Get diagnostics
+            diagnostics = [
+                __get_diagnostic(
+                    diag=d,
+                    test_case=test_case,
+                    test_case_results=test_case_results
+                ) for d in ['r_hat', 'ess']
+            ]
+
+            # Merge diagnostics dataframes
+            diagnostics_df = diagnostics[0].merge(
+                diagnostics[-1],
+                on=['test_case', 'coefficient']
+            )
+            
+            plot_df = pd.concat(
+                [
+                    plot_df,
+                    diagnostics_df
+                ],
+                axis=0
+            )
+
+            
+        # Calculate stats_df
+        stats_df = plot_df.groupby(
+            by=['test_case','coefficient'],
+            as_index=False
+        ).agg(
+            r_hat_mean=('r_hat', 'mean'),
+            r_hat_std=('r_hat', 'std'),
+            r_hat_min=('r_hat', 'min'),
+            r_hat_max=('r_hat', 'max'),
+            r_hat_median=('r_hat', 'median'),
+            ess_mean=('ess', 'mean'),
+            ess_std=('ess', 'std'),
+            ess_min=('ess', 'min'),
+            ess_max=('ess', 'max'),
+            ess_median=('ess', 'median'),
+        )
+
+        # Create plot
+        fig, (ax1, ax2) = plt.subplots(
+            nrows=2, ncols=1,
+            figsize=(20,15)
+        )
+        if log_scale:
+            ax1.set_yscale('log')
+            ax2.set_yscale('log')
+
+        # Plot horizontal line at 1
+        ax1.axhline(
+            1,
+            color='lightgray',
+            linestyle='--'
+        )
+
+        # Plot horizontal line at r-hat thresh
+        ax1.axhline(
+            parser.execution_config['mcmc']['R_hat_thresh'],
+            color='lightgray',
+            linestyle='--'
+        )
+
+        sns.boxplot(
+            data=plot_df,
+            x='test_case',
+            y='r_hat',
+            hue='coefficient',
+            color=box_color,
+            whis=whis_lims,
+            width=.7,
+            showfliers=False,
+            ax=ax1
+        )
+        ax1.set_ylabel(
+            r'$\widehat{R}$'
+        )
+
+        sns.boxplot(
+            data=plot_df,
+            x='test_case',
+            y='ess',
+            hue='coefficient',
+            color=box_color,
+            whis=whis_lims,
+            width=.7,
+            showfliers=False,
+            ax=ax2
+        )
+        ax2.set_ylabel(
+            r'$ESS$'
+        )
+        for spine in ['bottom', 'top', 'left', 'right']:
+            ax1.spines[spine].set_color('black')
+            ax2.spines[spine].set_color('black')
+        
+        ax1.set_xlabel(
+            'Caso de Teste'
+        )
+        ax2.set_xlabel(
+            'Caso de Teste'
+        )
+        
+        
+        # Plot vertical lines
+        [
+            ax1.axvline(
+                x+.5,
+                color='lightgray',
+                linestyle='--'
+            ) for x in ax1.get_xticks()
+        ]
+        [
+            ax2.axvline(
+                x+.5,
+                color='lightgray',
+                linestyle='--'
+            ) for x in ax2.get_xticks()
+        ]
+
+        
+    
+        # Save figure, if so specified
+        if save_dir is not None:
+            fig.savefig(
+                str(
+                    (save_dir / '{}.png'.format(save_name if save_name is not None else 'mcmc_r_hat_boxplots'))
+                ),
+                bbox_inches='tight'
+            )
+            
+        # Calculate statistics, if so specified
+        if return_stats:
+                return stats_df
+    
+    @staticmethod
+    def mcmc_trace_plots(
+        parser,
+        B_true,
+        test_cases=None,
+        save_dir=None,
+        save_name=None,
+        label_size=20,
+        legend_size=20,
+    ):
+        plt.rc(
+            'legend',
+            fontsize=legend_size,
+            title_fontsize=legend_size
+        )
+
+        plt.rcParams['axes.facecolor'] = 'white'
+        plt.rcParams['savefig.facecolor'] = 'white'
+
+        plt.rc('axes', labelsize=label_size)
+        plt.rc('xtick', labelsize=label_size)
+        plt.rc('ytick', labelsize=label_size)
+
+        parallel_chains = parser.execution_config['mcmc']['parallel_chains']
+        
+        if test_cases is not None:
+            parsed_results = {
+                k: v for k, v in parser.parsed_results.items() if k in test_cases
+            }
+
+        for test_case, test_case_results in parser.parsed_results.items():
+            # Plot chain evolutions
+            fig, axs = plt.subplots(
+                nrows=2, ncols=2,
+                figsize=(25,20)
+            )
+            fig.suptitle(
+                'Caso de teste: {}'.format(test_case)
+            )
+            samples_realizations = test_case_results['mmse']['samples']
+            for i,j in np.ndindex(B_true.shape):
+                for samples in samples_realizations:
+                    for c in range(parallel_chains):
+                        axs[i,j].plot(
+                            samples[c][:,i,j],
+                            # label=c
+                            linewidth=.5,
+                            color='cornflowerblue'
+                        )
+                # axs[i,j].legend(
+                #     fontsize=15
+                # )
+                axs[i,j].set_xlabel(
+                    'iteração',
+                    fontsize=15
+                )
+                axs[i,j].axhline(
+                    B_true[i,j],
+                    linestyle='--',
+                    color='gray'
+                )
+                axs[i,j].set_ylabel(
+                    'b{}{}'.format(
+                        i+1,
+                        j+1
+                    ),
+                    fontsize=15
+                )
+    
+    @staticmethod
+    def grad_asc_trace_plots(
+        parser,
+        B_true,
+        test_cases=None,
+        save_dir=None,
+        save_name=None,
+        label_size=20,
+        legend_size=20,
+    ):
+        plt.rc(
+            'legend',
+            fontsize=legend_size,
+            title_fontsize=legend_size
+        )
+
+        plt.rcParams['axes.facecolor'] = 'white'
+        plt.rcParams['savefig.facecolor'] = 'white'
+
+        plt.rc('axes', labelsize=label_size)
+        plt.rc('xtick', labelsize=label_size)
+        plt.rc('ytick', labelsize=label_size)
+        
+        if test_cases is not None:
+            parsed_results = {
+                k: v for k, v in parser.parsed_results.items() if k in test_cases
+            }
+
+        for test_case, test_case_results in parser.parsed_results.items():
+            # Plot chain evolutions
+            fig, axs = plt.subplots(
+                nrows=2, ncols=2,
+                figsize=(25,20)
+            )
+            fig.suptitle(
+                'Caso de teste: {}'.format(test_case)
+            )
+            B_estimates = [
+                np.stack(logs.B.values) for logs in test_case_results['map']['logs']
+            ]
+            for i,j in np.ndindex(B_true.shape):
+                for B_est in B_estimates:
+                        axs[i,j].plot(
+                            B_est[:,i,j],
+                            # label=c
+                            linewidth=.5,
+                            color='cornflowerblue'
+                        )
+                # axs[i,j].legend(
+                #     fontsize=15
+                # )
+                axs[i,j].set_xlabel(
+                    'iteração',
+                    fontsize=15
+                )
+                axs[i,j].axhline(
+                    B_true[i,j],
+                    linestyle='--',
+                    color='gray'
+                )
+                axs[i,j].set_ylabel(
+                    'b{}{}'.format(
+                        i+1,
+                        j+1
+                    ),
+                    fontsize=15
+                )
 
     @staticmethod
-    def get_log_posterior_fn(
-        source_pdf_fn,
-        prior_pdf_fn,
-        use_jax=False
+    def gradient_ascent_posteriori_evolutions(
+        parser,
+        test_cases=None,
+        save_dir=None,
+        save_name=None,
+        label_size=20,
+        legend_size=20,
     ):
-        """
-            This method returns a method for calculating log-posterior inside MCMC, with the option of using a jax
-            backend or not.
-        """
-        if not use_jax:
-            def __log_posterior_fn(
-                x,
-                B,
-                source_pdf_fn,
-                prior_pdf_fn
-            ):
-                NOBS=x.shape[-1]
-                # Cálculo de posteriori para registros
-                priori = prior_pdf_fn(B)
-                if priori > 0:
-                    posteriori = NOBS*np.log(np.abs(np.linalg.det(B))) + np.log(priori)
-                    y=B@x
-                    iterator = np.ndindex(x.shape)
-                    posteriori += np.sum(np.log(
-                        np.array([
-                            source_pdf_fn(y[i,j]) for i,j in iterator
-                        ])
-                    ))
-                elif priori == 0:
-                    posteriori = -np.inf
-                else:
-                    print(priori)
-                    print(B)
-                    print(prior_pdf_fn)
-                    raise ValueError('Prior value must be non-negative.')
-                return posteriori
+        plt.rc(
+            'legend',
+            fontsize=legend_size,
+            title_fontsize=legend_size
+        )
 
-            return lambda x, B: __log_posterior_fn(
-                x=x,
-                B=B,
-                source_pdf_fn=source_pdf_fn,
-                prior_pdf_fn=prior_pdf_fn
+        plt.rcParams['axes.facecolor'] = 'white'
+        plt.rcParams['savefig.facecolor'] = 'white'
+
+        plt.rc('axes', labelsize=label_size)
+        plt.rc('xtick', labelsize=label_size)
+        plt.rc('ytick', labelsize=label_size)
+
+        # Filter out desired test cases, if so specified
+        parsed_results = parser.parsed_results
+
+        if test_cases is not None:
+            parsed_results = {
+                k: v for k, v in parser.parsed_results.items() if k in test_cases
+            }
+        
+        
+        for test_case, test_case_results in parsed_results.items():
+            fig, ax = plt.subplots(
+                nrows=1, ncols=1,
+                figsize=(20,7)
+            )
+            fig.suptitle(
+                test_case
+            )
+            ax.set_xlabel(
+                'iteration',
+                fontsize=15
+            )
+            ax.set_ylabel(
+                'normalized log-posterior',
+                fontsize=15
+            )
+            for logs in test_case_results['map']['logs']:
+                ax.plot(
+                    logs.iteration.values,
+                    logs.log_posterior.values,
+                    linewidth=.5,
+                    color='cornflowerblue'
+                )
+    
+
+    @staticmethod
+    def IS_trace_plots(
+        results_is,
+        B_true,
+        test_cases=None,
+        save_dir=None,
+        save_name=None,
+        label_size=20,
+        legend_size=20,
+    ):
+        plt.rc(
+            'legend',
+            fontsize=legend_size,
+            title_fontsize=legend_size
+        )
+
+        plt.rcParams['axes.facecolor'] = 'white'
+        plt.rcParams['savefig.facecolor'] = 'white'
+
+        plt.rc('axes', labelsize=label_size)
+        plt.rc('xtick', labelsize=label_size)
+        plt.rc('ytick', labelsize=label_size)
+
+        parallel_chains = 4
+        
+
+        for analysis_type, analysis_results in results_is.items():
+            # Plot chain evolutions
+            fig, axs = plt.subplots(
+                nrows=2, ncols=2,
+                figsize=(25,20)
+            )
+            fig.suptitle(
+                analysis_type,
+                fontsize=25
+            )
+            samples_realizations = [analysis_results['raw_baseline_samples']]
+            for i,j in np.ndindex(B_true.shape):
+                for samples in samples_realizations:
+                    for c in range(parallel_chains):
+                        axs[i,j].plot(
+                            samples[c][:,i,j],
+                            # label=c
+                            linewidth=.5,
+                            color='cornflowerblue'
+                        )
+                # axs[i,j].legend(
+                #     fontsize=15
+                # )
+                axs[i,j].set_xlabel(
+                    'iteração',
+                    fontsize=15
+                )
+                axs[i,j].axhline(
+                    B_true[i,j],
+                    linestyle='--',
+                    color='gray'
+                )
+                axs[i,j].set_ylabel(
+                    'b{}{}'.format(
+                        i+1,
+                        j+1
+                    ),
+                fontsize=15
+        )
+            
+
+    @staticmethod
+    def visualize_IS_weights(
+        results_is,
+        true_B,
+        param_name,
+        alpha=0.5,
+        n_curves=None,
+        log_x=True
+    ):
+
+        for analysis_type, analysis_results in results_is.items():
+            
+            # Get distances from samples to true B's
+            dist_true_B = np.array([
+                np.linalg.norm(
+                    np.subtract(true_B, B_k)
+                ) for B_k in analysis_results['merged_baseline_samples']
+            ])
+
+            # Get indexes of plotted curves
+            if n_curves is not None:
+                plotted_idxs = [
+                int(idx) for idx in np.linspace(0, len(analysis_results['params'])-1, n_curves)
+                ]
+            fig, (ax1, ax2, ax3) = plt.subplots(
+                nrows=3, ncols=1,
+                figsize=(20,25)
+            )
+
+            ax1.set_xscale('log')
+            ax2.set_xscale('log')
+            ax3.set_xscale('log')
+
+            fig.suptitle(
+                analysis_type,
+                fontsize=15
+            )
+            # Plot weights
+            for i, w, param, k_hats in zip(
+                range(len(analysis_results['params'])),
+                analysis_results['weights'],
+                analysis_results['params'],
+                analysis_results['k_hat']
+            ):
+                if i in plotted_idxs:
+                    ax1.hist(
+                        w,
+                        bins='auto',
+                        label='{}={}'.format(param_name, f"{param:.3e}"),
+                        alpha=alpha,
+                        log=True
+                    )
+
+                    ax2.scatter(
+                        dist_true_B,
+                        w,
+                        label='{}={}'.format(param_name, f"{param:.3e}"),
+                    )
+            
+            # Plot k-hat      
+            ax3.plot(
+                analysis_results['params'],
+                analysis_results['k_hat']
+            )
+
+            ax1.set_xlabel(
+                'weight',
+                fontsize=15
+            )
+            ax1.set_ylabel(
+                'count',
+                fontsize=15
+            )
+            ax1.legend()
+
+            ax2.set_xlabel(
+                '||B-B_k||_F',
+                fontsize=15
+            )
+            ax2.set_ylabel(
+                'weight',
+                fontsize=15
+            )
+            ax2.legend()
+
+            ax3.set_xlabel(
+                param_name,
+                fontsize=15
+            )
+            ax3.set_ylabel(
+                '$\hat{k}$',
+                fontsize=15
+            )
+            ax3.legend()
+
+
+    @staticmethod
+    def visualize_IS_estimates_OLD(
+        results_is,
+        true_B,
+        param_name
+    ):
+        def __estimate_plot(
+            results,
+            var_type,
+            analysis_type,
+            true_B,
+            param_name
+        ):
+            fig, axs = plt.subplots(
+                nrows=2, ncols=2,
+                figsize=(25,15)
+            )
+            fig.suptitle(
+                analysis_type,
+                fontsize=15
+            )
+
+            for i, j in np.ndindex(true_B.shape):
+                axs[i,j].set_xscale('log')
+                axs[i,j].plot(
+                    results['params'],
+                    np.array(results[var_type+'s'])[:,i,j],
+                    color='cornflowerblue'
+                )
+                if var_type=='mean':
+                    axs[i,j].axhline(
+                        true_B[i,j],
+                        color='gray',
+                        linestyle='--'
+                    )
+                axs[i,j].set_xlabel(
+                    param_name,
+                    fontsize=15
+                )
+                axs[i,j].set_ylabel(
+                    '{}(b_{}{})'.format(
+                        var_type,
+                        i+1,
+                        j+1
+                    ),
+                    fontsize=15
+                )
+
+
+        for analysis_type, analysis_results in results_is.items():
+            _ = [
+                __estimate_plot(
+                    results=analysis_results,
+                    var_type=v,
+                    analysis_type=analysis_type,
+                    true_B=true_B,
+                    param_name=param_name
+                ) for v in [
+                    'mean',
+                    'var',
+                    'skew',
+                    'kurt'
+                ]
+            ]
+
+    @staticmethod
+    def visualize_IS_estimates(
+        results_is,
+        true_B,
+        param_name,
+        cmap=None
+    ):
+        def __estimate_plot(
+            results,
+            var_type,
+            true_B,
+            param_name,
+            cmap
+        ):
+            fig, axs = plt.subplots(
+                nrows=2, ncols=2,
+                figsize=(25,15)
+            )
+            fig.suptitle(
+                'Variation: {}'.format(param_name),
+                fontsize=25
+            )
+            for i, j in np.ndindex(true_B.shape):
+                axs[i,j].set_xscale('log')
+                for k, (analysis_type, analysis_results) in enumerate(results.items()): 
+                    axs[i,j].plot(
+                        analysis_results['params'],
+                        np.array(analysis_results[var_type+'s'])[:,i,j],
+                        color=cmap[k],
+                        label=analysis_type
+                    )
+                    if var_type=='mean':
+                        axs[i,j].axhline(
+                            true_B[i,j],
+                            color='gray',
+                            linestyle='--'
+                        )
+                    axs[i,j].set_xlabel(
+                        param_name,
+                        fontsize=15
+                    )
+                    axs[i,j].set_ylabel(
+                        '{}(b_{}{})'.format(
+                            var_type,
+                            i+1,
+                            j+1
+                        ),
+                        fontsize=15
+                    )
+                
+                # Plot legend
+                axs[i,j].legend()
+
+        # Get colormap
+        if cmap is None:
+            cmap = plt.cm.copper(
+                np.linspace(0,1,len(results_is))
             )
         else:
-            def __log_posterior_fn(
-                x,
-                B,
-                source_pdf_fn,
-                prior_pdf_fn
-            ):
-                x = jnp.asarray(x)
-                B = jnp.asarray(B)
+            cmap = cmap(np.linspace(0,1,len(results_is)))
+        
+        # Create plots
+        _ = [
+            __estimate_plot(
+                results=results_is,
+                var_type=v,
+                true_B=true_B,
+                param_name=param_name,
+                cmap=cmap
+            ) for v in [
+                'mean',
+                'var',
+                'skew',
+                'kurt'
+            ]
+        ]
 
-                NOBS=x.shape[-1]
-
-                # Avaliar priori
-                try:
-                    priori = prior_pdf_fn(B)
-                except Exception as e:
-                    import pdb; pdb.set_trace()
-                
-                # Avaliar determinante
-                sign, logabsdet = jnp.linalg.slogdet(B)
-                
-                # y = B@x
-                y=jnp.matmul(B,x)
-                
-                # Avaliar somatório
-                log_source = jnp.sum(jnp.log(source_pdf_fn(y)))
-                log_lik = NOBS*logabsdet + log_source
-                
-                # Log-priori segura: o duplo `where` impede gradientes NaN vindos de
-                # log(0), pois o JAX avalia os dois ramos antes de selecionar.
-                safe_priori = jnp.where(priori > 0, priori, 1.0)
-                log_prior = jnp.where(priori > 0, jnp.log(safe_priori), -jnp.inf)
-                posteriori = jnp.where(priori > 0, log_lik + log_prior, -jnp.inf)
-
-                return posteriori
-
-            return lambda x, B: __log_posterior_fn(
-                x=x,
-                B=B,
-                source_pdf_fn=source_pdf_fn,
-                prior_pdf_fn=prior_pdf_fn
-            )
-
-
+        
 
 class SignalGraphPlotter:
 

@@ -6,6 +6,22 @@ from .utilities import PosteriorUtilities
 import jax
 import jax.numpy as jnp
 
+import os
+import psutil
+from collections import Counter
+
+def jax_buffer_report(tag, top=12):
+    arrs = jax.live_arrays()
+    counts, nbytes = Counter(), Counter()
+    for a in arrs:
+        key = (tuple(a.shape), str(a.dtype))
+        counts[key] += 1
+        nbytes[key] += a.nbytes
+    total = sum(nbytes.values())
+    print(f"\n[{tag}] live_arrays={len(arrs)}  total={total/2**30:.3f} GiB")
+    print(f"RSS: {psutil.Process(os.getpid()).memory_info().rss/2**30:.2f} GiB")
+    for key, nb in nbytes.most_common(top):
+        print(f"   {counts[key]:>6} x {str(key[0]):<22} {key[1]:<8} {nb/2**20:>}")
 
 class PosteriorContourLines:
     
@@ -108,18 +124,25 @@ class PosteriorContourLines:
         )
 
         # Get grid matrices
+        B_true = np.linalg.inv(A)
         matrices_dicts = [
             __get_grid_matrices(
-                B_true = np.linalg.inv(A),
+                B_true = B_true,
                 idx_info=idx_info
             ) for idx_info in iterator
         ]
-        matrix_idxs = jnp.asarray([
-            (d['i'], d['j']) for d in matrices_dicts
-        ])
-        B_matrices = jnp.asarray([
-            d['B'] for d in matrices_dicts
-        ])
+        matrix_idxs = jnp.asarray(
+            np.array([
+                (d['i'], d['j']) for d in matrices_dicts
+            ])
+        )
+        B_matrices = jnp.asarray(
+            np.stack([
+                d['B'] for d in matrices_dicts
+            ])
+        )
+
+        del matrices_dicts
 
         # Wrapper function which will be used on matrices
         # exec_fn = partial(
@@ -163,6 +186,8 @@ class PosteriorContourLines:
 
         # Save posterior grid
         self.posterior_grid = z
+
+        # jax_buffer_report('Contour line run')
 
     
     def get_max_point(

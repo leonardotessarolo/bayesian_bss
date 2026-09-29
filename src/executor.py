@@ -1,17 +1,62 @@
 import os
+import gc
 import pandas as pd
 import numpy as np
 import pathos
 import functools
 import dill
 import jax.numpy as jnp
-from .estimator import BayesianEstimators
+from .estimator import BayesianEstimators, MMSEBarkerMHEstimator, ImportanceSamplingEstimator
 from .contour_line import PosteriorContourLines
 from .utilities import PosteriorUtilities
 from tqdm import tqdm 
 import time
+import jax
+import psutil
+import gc
+import logging
+from collections import Counter
 
-class ExperimentExecutor:
+logger = logging.getLogger(__name__)
+
+def jax_buffer_report(tag, top=12):
+    arrs = jax.live_arrays()
+    counts, nbytes = Counter(), Counter()
+    for a in arrs:
+        key = (tuple(a.shape), str(a.dtype))
+        counts[key] += 1
+        nbytes[key] += a.nbytes
+    total = sum(nbytes.values())
+    print(f"\n[{tag}] live_arrays={len(arrs)}  total={total/2**30:.3f} GiB")
+    print(f"RSS: {psutil.Process(os.getpid()).memory_info().rss/2**30:.2f} GiB")
+    for key, nb in nbytes.most_common(top):
+        print(f"   {counts[key]:>6} x {str(key[0]):<22} {key[1]:<8} {nb/2**20:>}")
+
+def find_retainers(shape=(4, 500, 2, 2), depth=3):
+    arrs = [a for a in jax.live_arrays() if a.shape == shape]
+    print(f"{len(arrs)} live arrays of shape {shape}")
+    if not arrs:
+        return
+    seen, frontier = set(), [arrs[0]]
+    for level in range(depth):
+        nxt = []
+        kinds = Counter()
+        for obj in frontier:
+            for r in gc.get_referrers(obj):
+                if id(r) in seen:
+                    continue
+                seen.add(id(r))
+                kinds[type(r).__name__] += 1
+                nxt.append(r)
+                if level >= 1 and not isinstance(r, (list, dict, tuple)):
+                    print(f"  L{level}: {type(r).__module__}.{type(r).__name__} "
+                          f"{repr(r)[:160]}")
+        print(f"level {level}: {dict(kinds)}")
+        frontier = nxt[:40]          # cap the fan-out
+
+
+
+class DiscreteExperimentExecutor:
 
     def __init__(
         self,
@@ -106,43 +151,6 @@ class ExperimentExecutor:
             prior_pdf = prior.get()
             prior_pdf_derivative = prior.get_derivative()
 
-            ########################################
-            # Configs for initialization execution #
-            ########################################
-
-            # # Configurations for MCMC sampling and Gradient Ascent optimization
-            # initialization_mcmc_configs, initialization_grad_asc_configs =  BayesianEstimators.generate_configs(
-            #     source_pdf=source_model_pdf,
-            #     source_pdf_derivative=source_model_pdf_derivative,
-            #     prior_pdf=prior_pdf,
-            #     prior_pdf_derivative=prior_pdf_derivative,
-            #     normalize_posterior=self.cfg['general']['normalize_posterior'],
-            #     n_samples_mcmc=self.cfg['mcmc']['n_samples'],
-            #     exploration_var_mcmc=self.cfg['mcmc']['exploration_var'],
-            #     parallel_chains_mcmc=self.cfg['mcmc']['parallel_chains'],
-            #     max_it_mcmc=self.cfg['mcmc']['max_it'],
-            #     R_hat_thresh_mcmc=self.cfg['mcmc']['R_hat_thresh'],
-            #     R_hat_evaluation_step_mcmc=self.cfg['mcmc']['R_hat_evaluation_step'],
-            #     R_hat_persistance_mcmc=self.cfg['mcmc']['R_hat_persistance'],
-            #     R_hat_minimum_burn_in_mcmc=self.cfg['mcmc']['R_hat_minimum_burn_in'],
-            #     learning_rate_grad_asc=self.cfg['initial_mode_seeking']['learning_rate'],
-            #     stopping_thresh_grad_asc=self.cfg['initial_mode_seeking']['stopping_thresh'],
-            #     max_it_grad_asc=self.cfg['initial_mode_seeking']['max_it'],
-            #     stopping_criterion_persistance_its_grad_asc=self.cfg['initial_mode_seeking']['stopping_criterion_persistance_its']
-            # )
-
-            # # Set configuration in estimators to run both
-            # initialization_mcmc_configs['run_mcmc'] = False
-            # initialization_grad_asc_configs['run_grad_asc'] = True
-
-            # # Save MAP and MCMC configs
-            # self.cfg['sim']['test_cases'][test_case]['initialization_mcmc_configs']=initialization_mcmc_configs
-            # self.cfg['sim']['test_cases'][test_case]['initialization_grad_asc_configs']=initialization_grad_asc_configs
-
-            ##################################
-            # Configs for standard execution #
-            ##################################
-
             # Configurations for MCMC sampling and Gradient Ascent optimization
             mcmc_configs, grad_asc_configs =  BayesianEstimators.generate_configs(
                 source_pdf=source_model_pdf,
@@ -164,6 +172,7 @@ class ExperimentExecutor:
                 learning_rate_grad_asc=self.cfg['map']['learning_rate'],
                 stopping_thresh_grad_asc=self.cfg['map']['stopping_thresh'],
                 max_it_grad_asc=self.cfg['map']['max_it'],
+                min_it_grad_asc=self.cfg['map']['min_it'],
                 stopping_criterion_persistance_its_grad_asc=self.cfg['map']['stopping_criterion_persistance_its']
             )
             
@@ -400,7 +409,6 @@ class ExperimentExecutor:
             # Iterate test cases, and for each test case find parallel_chains initial points with finite log posterior
             iterable = self.cfg['sim']['test_cases'].items()
             if self.cfg['general']['initialization_progress_bar']:
-                print('Executando inicialização')
                 iterable = tqdm(iterable)
             for test_case, test_case_cfgs in iterable:
                 test_case_cfgs['initial_conditions'] = {}
@@ -416,12 +424,12 @@ class ExperimentExecutor:
                     draw_points = self.cfg['mcmc']['parallel_chains']
                     while len(initial_condition) < self.cfg['mcmc']['parallel_chains']:
                         # Draw points
-                        random_draw = jnp.asarray([
+                        random_draw = np.asarray([
                             self.cfg['mcmc']['starting_distribution']() for _ in range(2*draw_points)
                         ])
 
                         # Get posteriors for points
-                        posteriors = jnp.array([
+                        posteriors = np.array([
                             self.cfg['sim']['test_cases'][test_case]['log_posterior_fn'](
                                 x=x,
                                 B=B_0
@@ -429,7 +437,7 @@ class ExperimentExecutor:
                         ])
 
                         # Finite idxs
-                        finite_idxs = jnp.where(np.array(posteriors) > -np.inf)[0]
+                        finite_idxs = np.where(np.array(posteriors) > -np.inf)[0]
                         if len(finite_idxs) > 0:
                             initial_condition = np.concatenate(
                                 [
@@ -475,8 +483,8 @@ class ExperimentExecutor:
                 map_initial_condition = gmm_means[test_case]
 
                 # Starting points for mmse are random points around gaussian mean
-                mmse_initial_condition = jnp.asarray([
-                    self.cfg['general']['B'] + self.cfg['mcmc']['starting_distribution']() for _ in range(self.cfg['mcmc']['parallel_chains'])
+                mmse_initial_condition = np.asarray([
+                    gmm_means[test_case] + self.cfg['mcmc']['starting_distribution']() for _ in range(self.cfg['mcmc']['parallel_chains'])
                 ])
 
                 # Save to dict
@@ -484,8 +492,6 @@ class ExperimentExecutor:
                     'map': [map_initial_condition],
                     'mmse': mmse_initial_condition,
                 }
-
-                # print(test_case_cfgs['initial_conditions'])
 
                 # Save to object attribute
                 self.cfg['sim']['test_cases'][test_case] = test_case_cfgs
@@ -584,16 +590,20 @@ class ExperimentExecutor:
             """
                 Runs experiment for one realization
             """
+            
             # Parse realization info
             realization_name = realization_info[0]
             realization_cfgs = realization_info[-1]
             
+            # Log realization
+            logger.info('Running realization {}.'.format(realization_name))
+
             # Iterate over test cases and execute experiment
             realization_results = {}
             iterable=self.cfg['sim']['test_cases'].items()
-            if self.cfg['general']['test_cases_progress_bar']:
-                iterable=tqdm(iterable)
             for test_case, test_case_cfgs in iterable:
+                # Log realization
+                logger.info('Running test case {}.'.format(test_case))
                 # Source for test case
                 test_case_source = test_case_cfgs['source']
 
@@ -624,7 +634,7 @@ class ExperimentExecutor:
                 start_grid = time.time_ns()
                 posteriori_grid = posteriori_grid_fn(x=x)
                 end_grid = time.time_ns()
-                print('Time spent in grid: {}'.format((end_grid-start_grid)/1E9)) 
+                logger.info('Time spent in grid (seconds): {}'.format(round((end_grid-start_grid)/1E9, 2)))
 
                 # Updates realization cfgs
                 realization_results[test_case] = {
@@ -639,14 +649,29 @@ class ExperimentExecutor:
             realization_cfgs['results'] = realization_results
 
             # Save results
-            print('Start saving')
+            start_saving = time.time_ns()
             realization_dir = cfg['general']['experiment_dir']  / realization_name
             with (realization_dir/'results_raw.pkl').open('wb') as f:
                 dill.dump(realization_cfgs, f)
-            print('End saving')
+            end_saving = time.time_ns()
+            logger.info('Time spent saving (seconds): {}'.format(round((end_saving-start_saving)/1E9, 2)))
 
             with (realization_dir/'success_flag.pkl').open('wb') as f:
                 dill.dump('SUCCESS', f)
+
+            # Delete as results have already been written
+            del realization_cfgs['results']
+            del realization_results
+            del mmse_estimator, map_estimator, posteriori_grid
+            gc.collect()
+
+            logger.info("JAX live arrays: %d", len(jax.live_arrays()))
+            # find_retainers()
+            
+            # Clear jax caches
+            jax.clear_caches()
+
+            # jax_buffer_report(f"realization {realization_name}")
 
 
         # Create execution functions for each realization
@@ -656,26 +681,21 @@ class ExperimentExecutor:
         )
         
         # Run experiment for each realization
-        
         iterable = self.__get_iterable()
-        # if (self.cfg['general']['n_workers'] > 1) and (self.cfg['general']['n_realizations'] > 1):
-        #     with pathos.pools.ProcessPool(self.cfg['general']['n_workers']) as p:
-        #         p.map(
-        #             realization_fn, 
-        #             iterable
-        #         )
-        # else:
+        gc.collect()
+        gc.freeze()
         if self.cfg['general']['realizations_progress_bar']:
             print('Executando experimento')
             iterable = tqdm(iterable)
         for elem in iterable:
-            realization_fn(elem)
-
-        # Debug
-        # iterable = self.__get_iterable()
-        # _ = [
-        #     realization_fn(elem) for elem in iterable
-        # ]
+            try:
+                realization_fn(elem)
+            except Exception:
+                logger.exception(
+                    "Realization %s failed",
+                    elem[0]
+                )
+                raise
 
 
 
@@ -792,7 +812,7 @@ class ExperimentExecutor:
 
 
 
-class ExperimentParser:
+class DiscreteExperimentParser:
     def __init__(
         self,
         experiment_dir
@@ -822,7 +842,7 @@ class ExperimentParser:
         with (self.experiment_dir/'execution_config.pkl').open('rb') as f:
                 self.execution_config = dill.load(f)
 
-    def __read_raw_results(
+    def __get_finished_realizations(
         self,
         verbose
     ):
@@ -835,19 +855,13 @@ class ExperimentParser:
                 'initial_mode_seeking'
             ]
         ]
-        realizations_results = {}
+
+        # Iterate in realizations and read success flags
         finished_realizations = []
         non_executed_realizations = []
-        for r in tqdm(realizations):
+        for r in realizations:
             # Get directory for realization
             realization_dir = self.experiment_dir / r
-            try:
-                # Read raw results
-                with (realization_dir/'results_raw.pkl').open('rb') as f:
-                        realizations_results[r] = dill.load(f)
-            except:
-                # non_executed_realizations.append(r)
-                pass
 
             # Read success flag
             with (realization_dir/'success_flag.pkl').open('rb') as f:
@@ -858,8 +872,7 @@ class ExperimentParser:
             else:
                 non_executed_realizations.append(str(r))
         
-        # Save to object attributes
-        self.realizations_results = realizations_results
+        self.finished_realizations = finished_realizations
         self.non_executed_realizations=non_executed_realizations
         
         if verbose:
@@ -868,6 +881,7 @@ class ExperimentParser:
             print('-'*100)
             print('Total of {} realizations without executed results'.format(len(non_executed_realizations)))
             print('#'*100)
+
 
     def __parse_raw_results(
         self,
@@ -904,8 +918,9 @@ class ExperimentParser:
             diagnostics = mmse_estimator.diagnostics
             # diagnostics = mmse_estimator.R_hats
             converged = mmse_estimator.converged
+            samples = mmse_estimator.samples
 
-            return B_est_mmse, mmse_error_norm, s_est_mmse, s_est_error_norm, diagnostics, converged
+            return B_est_mmse, mmse_error_norm, s_est_mmse, s_est_error_norm, diagnostics, converged, samples
 
         def __parse_map(
             map_estimator,
@@ -934,7 +949,10 @@ class ExperimentParser:
                 )
             )/np.linalg.norm(s)
 
-            return B_est_map, map_error_norm, s_est_map, s_est_error_norm
+            # Get execution logs
+            logs = map_estimator.gradient_ascent_results[0]['logs']
+
+            return B_est_map, map_error_norm, s_est_map, s_est_error_norm, logs
         
         def __parse_posteriori_grid(
             posteriori_grid,
@@ -982,152 +1000,218 @@ class ExperimentParser:
 
             return B_est_posteriori, posteriori_error_norm, s_est_posteriori, s_est_error_norm, u_max, v_max
 
-        # Test cases
-        test_cases = list(
-            self.execution_config['sim']['test_cases'].keys()
-        )
+        def __parse_realization(
+            realization_name
+        ):
+            
+            # Read raw results for realization
+            realization_dir = self.experiment_dir / realization_name
+            with (realization_dir/'results_raw.pkl').open('rb') as f:
+                results_raw = dill.load(f)
 
-        # Initialize dictionary to store parsed results
-        parsed_results = {}
-        for t in test_cases:
-            parsed_results[t] = {
-                'realization': [],
-                'mmse': {'object': []}, 
-                'map': {'object': []}, 
-                'posteriori_grid': {'object': []}
-            }
+            # Test cases
+            test_cases = list(
+                self.execution_config['sim']['test_cases'].keys()
+            )
+
+            # Initialize dictionary to store parsed results
+            parsed_results = {}
+            signals = {}
+            for t in test_cases:
+                parsed_results[t] = {
+                    'realization': realization_name,
+                    'mmse': {}, 
+                    'map': {}, 
+                    'posteriori_grid': {}
+                }
+                signals[t] = {
+                    's': None,
+                    'x': None,
+                }
         
-        # Iterate through realizations results and get objects for each test case
-        for r, results in self.realizations_results.items():
-            # Iterate through test cases
-            
-            for test_case in parsed_results.keys():
-                # Log realization
-                parsed_results[test_case]['realization'].append(r)
-
-                # Read mmse estimator
-                parsed_results[test_case]['mmse']['object'].append(results['results'][test_case]['mmse_estimator'])
-
-                # Read map estimator
-                parsed_results[test_case]['map']['object'].append(results['results'][test_case]['map_estimator'])
-
-                # Read posteriori_grid
-                parsed_results[test_case]['posteriori_grid']['object'].append(results['results'][test_case]['posteriori_grid'])
+            # Iterate through test cases and parse objects
+            for test_case, realizations_results in parsed_results.items():
+                # Get objects
+                mmse_estimator=results_raw['results'][test_case]['mmse_estimator']
+                map_estimator=results_raw['results'][test_case]['map_estimator']
+                posteriori_grid=results_raw['results'][test_case]['posteriori_grid']
                 
-        # Iterate through test cases and parse objects
-        for test_case, realizations_results in tqdm(parsed_results.items()):
-            # Initialize parsed fields
-            parsed_results[test_case]['mmse']['B_estimates'] = []
-            parsed_results[test_case]['mmse']['B_errors'] = []
-            parsed_results[test_case]['mmse']['s_estimates'] = []
-            parsed_results[test_case]['mmse']['s_errors'] = []
-            parsed_results[test_case]['mmse']['diagnostics'] = []
-            parsed_results[test_case]['mmse']['converged'] = []
-            parsed_results[test_case]['map']['B_estimates'] = []
-            parsed_results[test_case]['map']['B_errors'] = []
-            parsed_results[test_case]['map']['s_estimates'] = []
-            parsed_results[test_case]['map']['s_errors'] = []
-            parsed_results[test_case]['posteriori_grid']['grids'] = []
-            parsed_results[test_case]['posteriori_grid']['maximums'] = []
-            parsed_results[test_case]['posteriori_grid']['B_estimates'] = []
-            parsed_results[test_case]['posteriori_grid']['B_errors'] = []
-            parsed_results[test_case]['posteriori_grid']['s_estimates'] = []
-            parsed_results[test_case]['posteriori_grid']['s_errors'] = []
-
-
-            
-            # Parse estimator objects
-            for r, mmse_estimator, map_estimator, posteriori_grid in zip(
-                realizations_results['realization'],
-                realizations_results['mmse']['object'],
-                realizations_results['map']['object'],
-                realizations_results['posteriori_grid']['object']
-            ):
                 # Get signals
-                s = self.realizations_results[r][self.test_case_source_map[test_case]]['s']
-                x = self.realizations_results[r][self.test_case_source_map[test_case]]['x']
+                s = results_raw[self.test_case_source_map[test_case]]['s']
+                x = results_raw[self.test_case_source_map[test_case]]['x']
+
+                # Save signals
+                signals[test_case]['s'] = s
+                signals[test_case]['x'] = x
 
                 # Parse mmse
-                B_est, B_error_norm, s_est, s_error_norm, diagnostics, converged = __parse_mmse(
+                B_est, B_error_norm, s_est, s_error_norm, diagnostics, converged, samples = __parse_mmse(
                     mmse_estimator=mmse_estimator,
                     s=s,
                     x=x
                 )
-                parsed_results[test_case]['mmse']['B_estimates'].append(B_est)
-                parsed_results[test_case]['mmse']['B_errors'].append(B_error_norm)
-                parsed_results[test_case]['mmse']['s_estimates'].append(s_est)
-                parsed_results[test_case]['mmse']['s_errors'].append(s_error_norm)
-                parsed_results[test_case]['mmse']['diagnostics'].append(diagnostics)
-                parsed_results[test_case]['mmse']['converged'].append(converged)
+                parsed_results[test_case]['mmse']['B_estimates'] = B_est
+                parsed_results[test_case]['mmse']['B_errors'] = B_error_norm
+                parsed_results[test_case]['mmse']['s_estimates'] = s_est
+                parsed_results[test_case]['mmse']['s_errors'] = s_error_norm
+                parsed_results[test_case]['mmse']['diagnostics'] = diagnostics
+                parsed_results[test_case]['mmse']['converged'] = converged
+                parsed_results[test_case]['mmse']['samples'] = samples
             
                 # Parse map
-                B_est, B_error_norm, s_est, s_error_norm = __parse_map(
+                B_est, B_error_norm, s_est, s_error_norm, logs = __parse_map(
                     map_estimator=map_estimator,
                     s=s,
                     x=x
                 )
-                parsed_results[test_case]['map']['B_estimates'].append(B_est)
-                parsed_results[test_case]['map']['B_errors'].append(B_error_norm)
-                parsed_results[test_case]['map']['s_estimates'].append(s_est)
-                parsed_results[test_case]['map']['s_errors'].append(s_error_norm)
+                parsed_results[test_case]['map']['B_estimates'] = B_est
+                parsed_results[test_case]['map']['B_errors'] = B_error_norm
+                parsed_results[test_case]['map']['s_estimates'] = s_est
+                parsed_results[test_case]['map']['s_errors'] = s_error_norm
+                parsed_results[test_case]['map']['logs'] = logs
 
                 # Parse posteriori grid objects
                 # Save u_vec and v_vec
                 parsed_results[test_case]['posteriori_grid']['u_vec'] = posteriori_grid.u_vec
                 parsed_results[test_case]['posteriori_grid']['v_vec'] = posteriori_grid.v_vec
                 # Parse posteriori grid
-                parsed_results[test_case]['posteriori_grid']['grids'].append(posteriori_grid.posterior_grid)
+                parsed_results[test_case]['posteriori_grid']['grids'] = posteriori_grid.posterior_grid
                 B_est, B_error_norm, s_est, s_error_norm, u_max, v_max = __parse_posteriori_grid(
                     posteriori_grid=posteriori_grid,
                     s=s,
                     x=x
                 )
-                parsed_results[test_case]['posteriori_grid']['maximums'].append((u_max, v_max))
-                parsed_results[test_case]['posteriori_grid']['B_estimates'].append(B_est)
-                parsed_results[test_case]['posteriori_grid']['B_errors'].append(B_error_norm)
-                parsed_results[test_case]['posteriori_grid']['s_estimates'].append(s_est)
-                parsed_results[test_case]['posteriori_grid']['s_errors'].append(s_error_norm)
+                parsed_results[test_case]['posteriori_grid']['maximums'] = (u_max, v_max)
+                parsed_results[test_case]['posteriori_grid']['B_estimates'] = B_est
+                parsed_results[test_case]['posteriori_grid']['B_errors'] = B_error_norm
+                parsed_results[test_case]['posteriori_grid']['s_estimates'] = s_est
+                parsed_results[test_case]['posteriori_grid']['s_errors'] = s_error_norm
             
-        # Get individual estimates
-        for test_case, realizations_results in parsed_results.items():
-            # Iterate matrix indices to retrieve mmse and map estimates for individual coefficients
-            it_shape = (
-                self.execution_config['general']['n_sources'],
-                self.execution_config['general']['n_sources']
-            )
-            for i, j in np.ndindex(it_shape):
-                # Get mmse
-                parsed_results[test_case]['mmse'][
-                    'b{}{}_estimates'.format(
-                        i+1, j+1
-                    )
-                ] = np.array(parsed_results[test_case]['mmse']['B_estimates'])[:, i, j]
-                
-                
-                # Get map
-                parsed_results[test_case]['map'][
-                    'b{}{}_estimates'.format(
-                        i+1, j+1
-                    )
-                ] = np.array(parsed_results[test_case]['map']['B_estimates'])[:, i, j]
+            # Delete residual objects
+            del mmse_estimator
+            del map_estimator
+            del posteriori_grid
 
-            # Get average grid and maximum points for posteriori grid
-            # u
-            parsed_results[test_case]['posteriori_grid']['u_max'] = np.array(
-                parsed_results[test_case]['posteriori_grid']['maximums']
-            )[:, 0]
-            # v
-            parsed_results[test_case]['posteriori_grid']['v_max'] = np.array(
-                parsed_results[test_case]['posteriori_grid']['maximums']
-            )[:, -1]
-            # average grid
-            parsed_results[test_case]['posteriori_grid']['average_grid'] = np.mean(
-                a = parsed_results[test_case]['posteriori_grid']['grids'],
-                axis=0
+            self.signals = signals
+
+            return parsed_results
+        
+        def __format_results(
+            results
+        ):
+            # Test cases
+            test_cases = list(
+                self.execution_config['sim']['test_cases'].keys()
+            )
+            # Iterate in test cases and results and create parsed dict with
+            # test case as first dimension
+            parsed_results = {
+                t: {
+                    'realization': [],
+                    'mmse': {}, 
+                    'map': {}, 
+                    'posteriori_grid': {}
+                } for t in test_cases
+            }
+            
+            for t in test_cases:
+                # Initialize parsed fields
+                parsed_results[t]['mmse']['B_estimates'] = []
+                parsed_results[t]['mmse']['B_errors'] = []
+                parsed_results[t]['mmse']['s_estimates'] = []
+                parsed_results[t]['mmse']['s_errors'] = []
+                parsed_results[t]['mmse']['diagnostics'] = []
+                parsed_results[t]['mmse']['converged'] = []
+                parsed_results[t]['mmse']['samples'] = []
+                parsed_results[t]['map']['B_estimates'] = []
+                parsed_results[t]['map']['B_errors'] = []
+                parsed_results[t]['map']['s_estimates'] = []
+                parsed_results[t]['map']['s_errors'] = []
+                parsed_results[t]['map']['logs'] = []
+                parsed_results[t]['posteriori_grid']['grids'] = []
+                parsed_results[t]['posteriori_grid']['maximums'] = []
+                parsed_results[t]['posteriori_grid']['B_estimates'] = []
+                parsed_results[t]['posteriori_grid']['B_errors'] = []
+                parsed_results[t]['posteriori_grid']['s_estimates'] = []
+                parsed_results[t]['posteriori_grid']['s_errors'] = []
+                # Iterate in results and save to parsed_results
+                for r in results:
+                    parsed_results[t]['realization'].append(r[t]['realization'])
+                    parsed_results[t]['mmse']['B_estimates'].append(r[t]['mmse']['B_estimates'])
+                    parsed_results[t]['mmse']['B_errors'].append(r[t]['mmse']['B_errors'])
+                    parsed_results[t]['mmse']['s_estimates'].append(r[t]['mmse']['s_estimates'])
+                    parsed_results[t]['mmse']['s_errors'].append(r[t]['mmse']['s_errors'])
+                    parsed_results[t]['mmse']['diagnostics'].append(r[t]['mmse']['diagnostics'])
+                    parsed_results[t]['mmse']['converged'].append(r[t]['mmse']['converged'])
+                    parsed_results[t]['mmse']['samples'].append(r[t]['mmse']['samples'])
+                    parsed_results[t]['map']['B_estimates'].append(r[t]['map']['B_estimates'])
+                    parsed_results[t]['map']['B_errors'].append(r[t]['map']['B_errors'])
+                    parsed_results[t]['map']['s_estimates'].append(r[t]['map']['s_estimates'])
+                    parsed_results[t]['map']['s_errors'].append(r[t]['map']['s_errors'])
+                    parsed_results[t]['map']['logs'].append(r[t]['map']['logs'])
+                    parsed_results[t]['posteriori_grid']['grids'].append(r[t]['posteriori_grid']['grids'])
+                    parsed_results[t]['posteriori_grid']['maximums'].append(r[t]['posteriori_grid']['maximums'])
+                    parsed_results[t]['posteriori_grid']['B_estimates'].append(r[t]['posteriori_grid']['B_estimates'])
+                    parsed_results[t]['posteriori_grid']['B_errors'].append(r[t]['posteriori_grid']['B_errors'])
+                    parsed_results[t]['posteriori_grid']['s_estimates'].append(r[t]['posteriori_grid']['s_estimates'])
+                    parsed_results[t]['posteriori_grid']['s_errors'].append(r[t]['posteriori_grid']['s_errors'])
+                
+            # Get individual estimates
+            for test_case, _ in parsed_results.items():
+                # Iterate matrix indices to retrieve mmse and map estimates for individual coefficients
+                it_shape = (
+                    self.execution_config['general']['n_sources'],
+                    self.execution_config['general']['n_sources']
+                )
+                for i, j in np.ndindex(it_shape):
+                    # Get mmse
+                    parsed_results[test_case]['mmse'][
+                        'b{}{}_estimates'.format(
+                            i+1, j+1
+                        )
+                    ] = np.array(parsed_results[test_case]['mmse']['B_estimates'])[:, i, j]
+                    
+                    
+                    # Get map
+                    parsed_results[test_case]['map'][
+                        'b{}{}_estimates'.format(
+                            i+1, j+1
+                        )
+                    ] = np.array(parsed_results[test_case]['map']['B_estimates'])[:, i, j]
+
+                # Get average grid and maximum points for posteriori grid
+                # u
+                parsed_results[test_case]['posteriori_grid']['u_max'] = np.array(
+                    parsed_results[test_case]['posteriori_grid']['maximums']
+                )[:, 0]
+                # v
+                parsed_results[test_case]['posteriori_grid']['v_max'] = np.array(
+                    parsed_results[test_case]['posteriori_grid']['maximums']
+                )[:, -1]
+                # average grid
+                parsed_results[test_case]['posteriori_grid']['average_grid'] = np.mean(
+                    a = parsed_results[test_case]['posteriori_grid']['grids'],
+                    axis=0
+                )
+            
+            # Save to attribute
+            self.parsed_results=parsed_results
+
+        
+
+        # Iterate over realizations and parse
+        realizations_results = []
+        for r in tqdm(self.finished_realizations):
+            realizations_results.append( 
+                __parse_realization(
+                    realization_name=r
+                )
             )
 
-        # Save to attribute
-        self.parsed_results = parsed_results
+        # Put results in final parsed format
+        __format_results(
+            results=realizations_results
+        )
             
             
     def parse(
@@ -1139,7 +1223,381 @@ class ExperimentParser:
         self.__read_execution_configs()
 
         # Read raw results for realizations
-        self.__read_raw_results(verbose=verbose)
+        self.__get_finished_realizations(verbose=verbose)
 
         # Parse realizations results
         self.__parse_raw_results(verbose=verbose)
+
+
+class ContinuousExperimentExecutor:
+
+    def __init__(
+        self,
+        cfg,
+        initialize=True
+    ):
+        if initialize:
+            # Save cfg as attribute
+            self.cfg=cfg
+            
+            # Get source and mixture signals for all realizations
+            self.__initialize_signals()
+
+            # Get source model and prior distributions
+            self.__get_execution_objects()
+
+            # Get execution functions for test cases
+            self.__get_exec_fns()
+
+            # Get initial starting points for Gradient Ascent and MCMC
+            self.__get_initial_conditions()
+
+            # Save cfg and signals
+            self.__save_initializations()
+
+        else:
+            self.cfg=cfg
+
+            self.__read_signals()
+
+    
+    def __initialize_signals(
+        self
+    ):
+        
+        # Parse config object
+        A = self.cfg['general']['A']
+        n_realizations = self.cfg['general']['n_realizations']
+        n_sources = self.cfg['general']['n_sources']
+        n_obs = self.cfg['general']['n_obs']
+
+        # Initialize random seeds
+        seeds = [x for x in range(n_realizations)]
+        
+        # Initialize dict to keep signals
+        signals = {}
+        
+        # Iterate over realizations and generate signals
+        for r in range(n_realizations):
+            realization = {}
+            # Generate sources for each specified configuration
+            for s_name, s_obj in self.cfg['sources'].items():
+                # Get source realization
+                s = s_obj.get_realization(
+                    nsources=n_sources,
+                    nobs=n_obs,
+                    seed=seeds[r]
+                )
+                # Get mixtures
+                x = A@s
+                # Save signals
+                realization[s_name] = {
+                    's': s,
+                    'x': x
+                }
+                signals[str(r)] = realization
+
+        self.signals=signals
+        
+    
+    def __get_execution_objects(
+        self
+    ):
+        # Enrich prior variations
+        if len(self.cfg['prior_variation']) > 0:
+            for variation, variation_params in self.cfg['prior_variation'].items():
+                if len(variation_params)>0:
+                    # Get target priors
+                    self.cfg['prior_variation'][variation]['target_priors'] = variation_params['target_param_fn'](
+                        target_params=variation_params['target_param_values']
+                    )
+                    # Instantiate sampler for each source-model (baseline model assumed to be equal to source)
+                    self.cfg['prior_variation'][variation]['mcmc_samplers'] = {}
+                    for s_name, s_obj in self.cfg['sources'].items():
+                        # Instantiate MCMC sampler
+                        self.cfg['prior_variation'][variation]['mcmc_samplers'][s_name] = MMSEBarkerMHEstimator(
+                            n_samples=self.cfg['mcmc']['n_samples'],
+                            source_pdf_fn=s_obj.get(),
+                            prior_pdf_fn=variation_params['base_prior'].get(),
+                            exploration_var=self.cfg['mcmc']['exploration_var'],
+                            parallel_chains=self.cfg['mcmc']['parallel_chains'],
+                            max_it=self.cfg['mcmc']['max_it'],
+                            R_hat_thresh=self.cfg['mcmc']['R_hat_thresh'],
+                            R_hat_evaluation_step=self.cfg['mcmc']['R_hat_evaluation_step'],
+                            R_hat_persistance=self.cfg['mcmc']['R_hat_persistance'],
+                            R_hat_minimum_burn_in=self.cfg['mcmc']['R_hat_minimum_burn_in'],
+                            auto_adjust_exploration_var=self.cfg['mcmc']['auto_adjust_exploration_var'],
+                            progress_bar=self.cfg['mcmc']['progress_bar'],
+                            target_accept_prob=self.cfg['mcmc']['target_accept_prob']
+                        )
+         # Enrich likelihood variations           
+        if len(self.cfg['likelihood_variation']) > 0:
+            pass
+        
+
+    def __get_exec_fns(
+        self
+    ):
+        def __run_mcmc(
+            mmse_estimator,
+            initial_conditions,
+            x
+        ):
+            """
+                Runs mcmc for one realization
+            """
+            # run mcmc
+            samples, diagnostics, logs = mmse_estimator.fit(
+                x=x,
+                initial_condition=initial_conditions
+            )
+
+            return samples, diagnostics, logs
+
+        
+        # Iterate over prior variations and obtain functions to be executed for each realization
+        if len(self.cfg['prior_variation']) > 0:
+            for variation, variation_params in self.cfg['prior_variation'].items():
+                if len(variation_params)>0:
+                    self.cfg['prior_variation'][variation]['base_log_posteriors'] = {}
+                    self.cfg['prior_variation'][variation]['mcmc_execution_functions'] = {}
+                    for s_name, s_obj in self.cfg['sources'].items():
+                        # Instantiate log posterior function
+                        self.cfg['prior_variation'][variation]['base_log_posteriors'][s_name] = PosteriorUtilities.get_log_posterior_fn(
+                            source_pdf_fn=s_obj.get(),
+                            prior_pdf_fn=variation_params['base_prior'].get(),
+                        )
+
+                        # MCMC execution function - baseline posteriors
+                        self.cfg['prior_variation'][variation]['mcmc_execution_functions'][s_name] = functools.partial(
+                            __run_mcmc,
+                            self.cfg['prior_variation'][variation]['mcmc_samplers'][s_name]
+                        )
+
+        # Iterate over likelihood variations and obtain functions to be executed for each realization
+        if len(self.cfg['likelihood_variation']) > 0:
+            pass
+
+
+    def __get_initial_conditions(
+        self
+    ):
+        self.initial_conditions = np.array([
+            np.add(
+                self.cfg['mcmc']['starting_distribution'](),
+                self.cfg['general']['B']
+            ) for c in range(self.cfg['mcmc']['parallel_chains'])
+        ])
+        
+
+    def __save_initializations(
+        self
+    ):
+        # Get experiment_dir
+        experiment_dir = self.cfg['general']['experiment_dir']
+        
+        # Iterate over realizations and save signals
+        for r, res in self.signals.items():
+            # Get dir for saving realization results
+            realization_dir = experiment_dir / r
+
+            # Save results
+            with (realization_dir/'signals.pkl').open('wb') as f:
+                dill.dump(res, f)
+
+        # Save updated config file
+        with (experiment_dir/'execution_config.pkl').open('wb') as f:
+                dill.dump(self.cfg, f)
+
+
+    def __read_signals(
+        self
+    ):
+        
+        # Get realization iterable
+        realizations = range(self.cfg['general']['n_realizations'])
+
+        # Get experiment dir
+        experiment_dir = self.cfg['general']['experiment_dir']
+
+        # Read signals
+        signals = {}
+        for r in realizations:
+            # Get dir for reading realization results
+            realization_dir = experiment_dir / str(r)
+
+            # Read signals
+            with (realization_dir/'signals.pkl').open('rb') as f:
+                signals[str(r)] = dill.load(f)
+            
+        self.signals=signals
+
+    def __get_iterable(
+            self
+    ):
+        # Get realization iterable
+        realizations = range(self.cfg['general']['n_realizations'])
+
+         # Get experiment dir
+        experiment_dir = self.cfg['general']['experiment_dir']
+
+        # Iterate and identify finished realizations
+        finished_realizations = []
+        for r in realizations:
+            
+            # Get dir for reading realization results
+            realization_dir = experiment_dir / str(r)
+
+            # Read success flag
+            with (realization_dir/'success_flag.pkl').open('rb') as f:
+                success_flag = dill.load(f)
+
+            if success_flag=='SUCCESS':
+                finished_realizations.append(str(r))
+        
+        
+        # Get realizations to run
+        unfinished_realizations_signals = {
+            k:v for k, v in self.signals.items() if k not in finished_realizations
+        }
+
+        # Print status
+        print('#'*100)
+        print('Total realizations: {}'.format(self.cfg['general']['n_realizations']))
+        print('Finished realizations: {}'.format(len(finished_realizations)))
+        print('Unfinished realizations: {}'.format(len(unfinished_realizations_signals.keys())))
+        print('#'*100)
+
+        return unfinished_realizations_signals.items()
+    
+
+    def run(
+        self
+    ):
+
+        def __run_realization(
+            cfg,
+            realization_info,
+        ):
+            """
+                Runs experiment for one realization
+            """
+            
+            # Parse realization info
+            realization_name = realization_info[0]
+            realization_cfgs = realization_info[-1]
+            
+            # Log realization
+            logger.info('Running realization {}.'.format(realization_name))
+
+            # Iterate over specified analyses and perform operations
+            realization_results = {}
+            # Iterate over prior variations and obtain functions to be executed for each realization
+            if len(self.cfg['prior_variation']) > 0:
+                realization_results['prior_variation'] = {}
+                for variation, variation_params in self.cfg['prior_variation'].items():
+                    # Log realization
+                    logger.info('Running prior variation: {}.'.format(variation))
+                    realization_results['prior_variation'][variation] = {}
+                    if len(variation_params)>0:
+                        for s_name, s_obj in self.cfg['sources'].items():
+                            logger.info('Running analysis for source: {}.'.format(s_name))
+                            # Obtain sources and mixtures
+                            s = realization_cfgs[s_name]['s']
+                            x = realization_cfgs[s_name]['x']
+
+                            # Get function for executing MCMC
+                            mcmc_execution_function = variation_params['mcmc_execution_functions'][s_name]
+
+                            # Execute MCMC
+                            start_mcmc = time.time_ns()
+                            samples, diagnostics, logs = mcmc_execution_function(
+                                initial_conditions=self.initial_conditions,
+                                x=x
+                            )
+                            end_mcmc = time.time_ns()
+                            logger.info('Time spent in MCMC (seconds): {}'.format(round((end_mcmc-start_mcmc)/1E9, 2)))
+
+                            # Execute importance sampling
+                            start_is = time.time_ns()
+                            is_results = ImportanceSamplingEstimator.run(
+                                samples=self.cfg['prior_variation'][variation]['mcmc_samplers'][s_name].mcmc_results['samples'],
+                                diagnostics=diagnostics,
+                                baseline_prior=variation_params['base_prior'],
+                                x=x,
+                                target_priors=variation_params['target_priors'],
+                                prior_control_params=variation_params['target_param_values'],
+                                baseline_source_model=s_obj,
+                                target_source_models=None,
+                                source_model_control_params=None
+                            )
+                            end_is = time.time_ns()
+                            logger.info('Time spent in IS (seconds): {}'.format(round((end_is-start_is)/1E9, 2)))
+
+                            # Updates realization cfgs
+                            realization_results['prior_variation'][variation][s_name] = {
+                                's': s,
+                                'x': x,
+                                'merged_baseline_samples': self.cfg['prior_variation'][variation]['mcmc_samplers'][s_name].mcmc_results['samples'],
+                                'raw_baseline_samples': samples,
+                                'mcmc':{
+                                    'diagnostics': diagnostics,
+                                    'logs': logs
+                                }
+                            }
+                            realization_results['prior_variation'][variation][s_name].update(is_results['prior_variation'])
+
+            # Saves to realization_cfgs
+            realization_cfgs['results'] = realization_results
+
+            # Save results
+            start_saving = time.time_ns()
+            realization_dir = cfg['general']['experiment_dir']  / realization_name
+            with (realization_dir/'results_raw.pkl').open('wb') as f:
+                dill.dump(realization_cfgs, f)
+            end_saving = time.time_ns()
+            logger.info('Time spent saving (seconds): {}'.format(round((end_saving-start_saving)/1E9, 2)))
+
+            with (realization_dir/'success_flag.pkl').open('wb') as f:
+                dill.dump('SUCCESS', f)
+
+            # Delete as results have already been written
+            del realization_cfgs['results']
+            del realization_results
+            del mcmc_execution_function
+            sampler = self.cfg['prior_variation'][variation]['mcmc_samplers'][s_name]
+            sampler.samples = None
+            sampler.logs = None
+            sampler.diagnostics = None
+            sampler.mcmc_results = None
+            del samples, diagnostics, logs
+            gc.collect()
+
+            logger.info("JAX live arrays: %d", len(jax.live_arrays()))
+            # find_retainers()
+            
+            # Clear jax caches
+            jax.clear_caches()
+
+
+
+        # Create execution functions for each realization
+        realization_fn = functools.partial(
+            __run_realization,
+            self.cfg
+        )
+        
+        # Run experiment for each realization
+        iterable = self.__get_iterable()
+        if self.cfg['general']['realizations_progress_bar']:
+            print('Executando experimento')
+            iterable = tqdm(iterable)
+        for elem in iterable:
+            try:
+                realization_fn(elem)
+            except Exception:
+                logger.exception(
+                    "Realization %s failed",
+                    elem[0]
+                )
+                raise
