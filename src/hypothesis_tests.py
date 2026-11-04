@@ -964,3 +964,199 @@ class HypothesisTestsCases:
         # Calculate statistics, if so specified
         if return_stats:
             return stats_df
+        
+
+    @staticmethod
+    def run_pairwise_ttests(
+        parser,
+        analysis,
+        test_pairs=None,
+        test_type='paired',
+        alpha=0.05,
+        equal_var=True,
+        alternative='two-sided',
+        nan_policy='omit',
+        correction_scope='metric'
+    ):
+        """Run paired or independent t-tests with Holm correction.
+
+        ``metrics`` maps names to callables that receive one case-result dict
+        and return a one-dimensional sample. By default, u, v and delta_S are
+        extracted from ``posteriori_grid``. Independent tests use Welch's test
+        unless ``equal_var=True``. ``correction_scope`` may be ``'all'`` or
+        ``'metric'``.
+        """
+        def __holm_adjust(
+                pvalues
+            ):
+            
+            pvalues = np.asarray(pvalues, dtype=float)
+            adjusted = np.full(pvalues.shape, np.nan)
+            finite = np.isfinite(pvalues)
+            finite_pvalues = pvalues[finite]
+            if not finite_pvalues.size:
+                return adjusted
+            order = np.argsort(finite_pvalues)
+            sorted_pvalues = finite_pvalues[order]
+            n_tests = sorted_pvalues.size
+            sorted_adjusted = np.maximum.accumulate(
+                (n_tests - np.arange(n_tests)) * sorted_pvalues
+            ).clip(max=1.0)
+            restored = np.empty(n_tests)
+            restored[order] = sorted_adjusted
+            adjusted[finite] = restored
+
+            return adjusted
+
+        if test_type not in {'paired', 'independent'}:
+            raise ValueError("test_type must be 'paired' or 'independent'.")
+        if correction_scope not in {'all', 'metric'}:
+            raise ValueError("correction_scope must be 'all' or 'metric'.")
+        if not 0 < alpha < 1:
+            raise ValueError("alpha must be strictly between 0 and 1.")
+        if analysis not in {'posteriori_grid', 'map', 'mmse', 'map_vs_mmse'}:
+            raise ValueError("analysis must be 'posteriori_grid', 'map', 'mmse' or 'map_vs_mmse'.")
+
+        if analysis=='posteriori_grid':
+            metrics = {
+                'u': lambda r: [x[0] for x in r['posteriori_grid']['maximums']],
+                'v': lambda r: [x[-1] for x in r['posteriori_grid']['maximums']],
+                'delta_B': lambda r: r['posteriori_grid']['B_errors'],
+                'delta_S': lambda r: r['posteriori_grid']['s_errors']
+            }
+        elif analysis=='map':
+            metrics = {
+                'delta_B': lambda r: r['map']['B_errors'],
+                'delta_S': lambda r: r['map']['s_errors']
+            }
+        elif analysis=='mmse':
+            metrics = {
+                'delta_B': lambda r: r['mmse']['B_errors'],
+                'delta_S': lambda r: r['mmse']['s_errors']
+            }
+        elif analysis=='map_vs_mmse':
+            metrics = {
+                'delta_B': {
+                    'map': lambda r: r['map']['B_errors'],
+                    'mmse': lambda r: r['mmse']['B_errors']
+                },
+                'delta_S': {
+                    'map': lambda r: r['map']['s_errors'],
+                    'mmse': lambda r: r['mmse']['s_errors']
+                },
+            }
+
+        rows = []
+        available_cases = parser.parsed_results
+        if analysis != 'map_vs_mmse':
+            for pair in test_pairs:
+                if len(pair) != 2:
+                    raise ValueError(f"Each test pair must have two cases: {pair!r}.")
+                case_0, case_1 = pair
+                missing = [case for case in pair if case not in available_cases]
+                if missing:
+                    raise KeyError(f"Unknown test case(s): {missing}.")
+
+                for metric, extractor in metrics.items():
+                    sample_0 = np.asarray(
+                        extractor(available_cases[case_0]), dtype=float
+                    ).reshape(-1)
+                    sample_1 = np.asarray(
+                        extractor(available_cases[case_1]), dtype=float
+                    ).reshape(-1)
+
+                    if test_type == 'paired':
+                        if sample_0.size != sample_1.size:
+                            raise ValueError(
+                                f"Paired test {case_0!r} vs {case_1!r} for "
+                                f"{metric!r} requires equal sizes; got "
+                                f"{sample_0.size} and {sample_1.size}."
+                            )
+                        result = st.ttest_rel(
+                            sample_0, 
+                            sample_1, 
+                            alternative=alternative,
+                            nan_policy=nan_policy
+                        )
+                    else:
+                        result = st.ttest_ind(
+                            sample_0, 
+                            sample_1, 
+                            equal_var=equal_var,
+                            alternative=alternative, 
+                            nan_policy=nan_policy
+                        )
+
+                    rows.append({
+                        'case_0': case_0, 
+                        'case_1': case_1, 
+                        'metric': metric,
+                        'test_type': test_type,
+                        'equal_var': equal_var if test_type == 'independent' else np.nan,
+                        'alternative': alternative,
+                        'n_0': sample_0.size, 'n_1': sample_1.size,
+                        'mean_0': np.nanmean(sample_0),
+                        'mean_1': np.nanmean(sample_1),
+                        'mean_difference': np.nanmean(sample_0) - np.nanmean(sample_1),
+                        'statistic': float(result.statistic),
+                        'degrees_of_freedom': float(getattr(result, 'df', np.nan)),
+                        'pvalue': float(result.pvalue)
+                    })
+        else:
+            for test_case, test_case_results in available_cases.items():
+                for metric, extractors in metrics.items():
+                    # Get samples
+                    sample_0 = np.asarray(
+                        extractors['map'](test_case_results), dtype=float
+                    ).reshape(-1)
+                    sample_1 = np.asarray(
+                        extractors['mmse'](test_case_results), dtype=float
+                    ).reshape(-1)
+
+                    # Check sizes
+                    if sample_0.size != sample_1.size:
+                        raise ValueError(
+                            f"Paired test {case_0!r} vs {case_1!r} for "
+                            f"{metric!r} requires equal sizes; got "
+                            f"{sample_0.size} and {sample_1.size}."
+                        )
+                    
+                    # Perform paired t-tets
+                    result = st.ttest_rel(
+                        sample_0, 
+                        sample_1, 
+                        alternative=alternative,
+                        nan_policy=nan_policy
+                    )
+
+                    rows.append({
+                        'case': test_case, 
+                        'metric': metric,
+                        'test_type': 'paired',
+                        'equal_var': equal_var if test_type == 'independent' else np.nan,
+                        'alternative': alternative,
+                        'n_0': sample_0.size, 'n_1': sample_1.size,
+                        'mean_0': np.nanmean(sample_0),
+                        'mean_1': np.nanmean(sample_1),
+                        'mean_difference': np.nanmean(sample_0) - np.nanmean(sample_1),
+                        'statistic': float(result.statistic),
+                        'degrees_of_freedom': float(getattr(result, 'df', np.nan)),
+                        'pvalue': float(result.pvalue)
+                    })
+
+        results = pd.DataFrame(rows)
+        if results.empty:
+            results['pvalue_holm'] = pd.Series(dtype=float)
+            results['reject_holm'] = pd.Series(dtype=bool)
+            return results
+
+        # Apply Holm correction
+        if correction_scope == 'all':
+            results['pvalue_holm'] = __holm_adjust(results['pvalue'])
+        else:
+            results['pvalue_holm'] = results.groupby(
+                'metric', sort=False
+            )['pvalue'].transform(lambda x: __holm_adjust(x.to_numpy()))
+        results['reject_holm'] = results['pvalue_holm'] <= alpha
+
+        return results

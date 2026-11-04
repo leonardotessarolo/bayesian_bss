@@ -1,10 +1,17 @@
+import os
 import pandas as pd
 import numpy as np
 import jax.numpy as jnp
+import itertools
+
+import scipy.stats as st
 
 import plotly.graph_objects as go
 from matplotlib import pyplot as plt
 import seaborn as sns
+
+from .source import StudentTSource, StandardLogisticSource, LogisticSource, TriangularSource
+from .prior import MultivariateTPrior, ExponentialPrior
 
 class PosteriorUtilities:
 
@@ -65,10 +72,7 @@ class PosteriorUtilities:
                 NOBS=x.shape[-1]
 
                 # Avaliar priori
-                try:
-                    priori = prior_pdf_fn(B)
-                except Exception as e:
-                    import pdb; pdb.set_trace()
+                priori = prior_pdf_fn(B)
                 
                 # Avaliar determinante
                 sign, logabsdet = jnp.linalg.slogdet(B)
@@ -77,7 +81,10 @@ class PosteriorUtilities:
                 y=jnp.matmul(B,x)
                 
                 # Avaliar somatório
-                log_source = jnp.sum(jnp.log(source_pdf_fn(y)))
+                log_source = jnp.sum(
+                    jnp.log(source_pdf_fn(y)),
+                    axis=(-2, -1)
+                )
                 log_lik = NOBS*logabsdet + log_source
                 
                 # Log-priori segura: o duplo `where` impede gradientes NaN vindos de
@@ -96,6 +103,1091 @@ class PosteriorUtilities:
             )
 
 
+class AnalysisUtilities:
+
+    SYM = np.array([[0., 1.], [1., 0.]])     # S: must match contour_line.py
+    SKEW = np.array([[0., -1.], [1., 0.]])   # K: must match contour_line.py
+
+    # ------------------------------------------------------------------ #
+    # Projection onto the affine plane  B* + span{S, K}
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def project_uv(B, B_true, S=None, K=None):
+        """
+        Orthogonal (Frobenius) projection of B onto {B_true + u S + v K}.
+        B may be (n, n) or (R, n, n).
+        Returns u, v, B_proj, dist_to_plane (= ||B - B_proj||_F).
+        """
+        S = AnalysisUtilities.SYM if S is None else S
+        K = AnalysisUtilities.SKEW if K is None else K
+        B = np.asarray(B, dtype=float)
+        single = B.ndim == 2
+        if single:
+            B = B[None]
+
+        D = (B - B_true).reshape(B.shape[0], -1)              # (R, n^2)
+        M = np.stack([S.ravel(), K.ravel()], axis=1)          # (n^2, 2)
+        coef, *_ = np.linalg.lstsq(M, D.T, rcond=None)        # (2, R)  -- general Gram solve
+        u, v = coef
+        B_proj = B_true + u[:, None, None] * S + v[:, None, None] * K
+        dist = np.linalg.norm(B - B_proj, axis=(1, 2))
+
+        if single:
+            return u[0], v[0], B_proj[0], dist[0]
+        return u, v, B_proj, dist
+
+    # ------------------------------------------------------------------ #
+    # Main comparison
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def compare_average_B(
+        parser,
+        only_converged_mmse: bool = False,
+        decimals: int = 3,
+        verbose: bool = True,
+    ):
+        """
+        For each test case:
+          - average B over realizations for Grid / MAP / MMSE
+          - projection (u, v) of each estimate onto the plane B* + uS + vK
+          - distance of each estimate to that plane (part the grid cannot see)
+
+        Returns
+        -------
+        summary : DataFrame indexed by (test_case, method) with
+                  b11..b22, u, v, u_std, v_std, dist_to_plane, mean_dist_to_plane,
+                  ||B-B*||_F, delta_B, mean_delta_B, n
+        per_realization : long DataFrame (test_case, method, realization, u, v,
+                          dist_to_plane, delta_B), ready for scatter plots
+        """
+        if not hasattr(parser, "parsed_results"):
+            raise AttributeError("Call parser.parse() before compare_average_B().")
+
+        B_true = np.asarray(parser.execution_config["general"]["B"], dtype=float)
+        if B_true.shape != (2, 2):
+            raise ValueError("The (u, v) plane is defined for 2x2 B only.")
+        norm_true = np.linalg.norm(B_true)
+
+        methods = {"Grid": "posteriori_grid", "MAP": "map", "MMSE": "mmse"}
+
+        rows, per_real_rows, blocks = [], [], {}
+        for tc in parser.execution_config["sim"]["test_cases"].keys():
+            res_tc = parser.parsed_results[tc]
+            realizations = np.asarray(res_tc["realization"])
+            blocks[tc] = {"B*": (B_true, None, (0.0, 0.0, 0.0))}
+
+            for label, key in methods.items():
+                mats = np.stack([np.asarray(B, dtype=float)
+                                 for B in res_tc[key]["B_estimates"]])     # (R, 2, 2)
+
+                mask = np.all(np.isfinite(mats), axis=(1, 2))
+                if label == "MMSE" and only_converged_mmse:
+                    mask &= np.asarray(res_tc["mmse"]["converged"], dtype=bool)
+                mats, reals = mats[mask], realizations[mask]
+                n = mats.shape[0]
+
+                if n == 0:
+                    B_avg = np.full_like(B_true, np.nan)
+                    u_r = v_r = d_r = err_r = np.array([np.nan])
+                    u_a = v_a = d_a = np.nan
+                else:
+                    B_avg = mats.mean(axis=0)
+                    # per-realization projections
+                    u_r, v_r, _, d_r = AnalysisUtilities.project_uv(mats, B_true)
+                    err_r = np.linalg.norm(mats - B_true, axis=(1, 2)) / norm_true
+                    # projection of the averaged matrix (= mean of u_r, v_r by linearity)
+                    u_a, v_a, _, d_a = AnalysisUtilities.project_uv(B_avg, B_true)
+
+                    for rz, uu, vv, dd, ee in zip(reals, u_r, v_r, d_r, err_r):
+                        per_real_rows.append({
+                            "test_case": tc, "method": label, "realization": rz,
+                            "u": uu, "v": vv, "dist_to_plane": dd, "delta_B": ee,
+                        })
+
+                err = np.linalg.norm(B_avg - B_true)
+                blocks[tc][label] = (B_avg, n, (u_a, v_a, d_a))
+
+                rows.append({
+                    "test_case": tc, "method": label,
+                    "b11": B_avg[0, 0], "b12": B_avg[0, 1],
+                    "b21": B_avg[1, 0], "b22": B_avg[1, 1],
+                    "u": u_a, "v": v_a,
+                    "u_std": np.nanstd(u_r), "v_std": np.nanstd(v_r),
+                    "dist_to_plane": d_a,                 # of the averaged matrix
+                    "mean_dist_to_plane": np.nanmean(d_r),
+                    "||B-B*||_F": err,
+                    "delta_B": err / norm_true,
+                    "mean_delta_B": np.nanmean(err_r),
+                    "n": n,
+                })
+
+        summary = pd.DataFrame(rows).set_index(["test_case", "method"]).round(decimals)
+        per_realization = pd.DataFrame(per_real_rows)
+
+        if verbose:
+            AnalysisUtilities._print_side_by_side(blocks, decimals)
+
+        return summary, per_realization
+
+    # ------------------------------------------------------------------ #
+    # Pretty printing
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _print_side_by_side(blocks: dict, decimals: int = 3) -> None:
+        S, K = AnalysisUtilities.SYM, AnalysisUtilities.SKEW
+        if not np.isclose(np.sum(S * K), 0.0):
+            raise ValueError("S and K must be Frobenius-orthogonal for the per-axis formulas.")
+        p, w = decimals, decimals + 5
+        num = lambda x: f"{x:+.{p}f}"
+        mat_row = lambda r: "[" + " ".join(f"{x:>{w}.{p}f}" for x in r) + " ]"
+
+        def nz(M):
+            return [(i, j) for i, j in np.ndindex(M.shape) if M[i, j] != 0]
+
+        def symbolic(M):
+            s = ""
+            for i, j in nz(M):
+                c = M[i, j]
+                mag = "" if abs(c) == 1 else f"{abs(c):g}·"
+                s += f"{'+' if c > 0 else '-'}{mag}Δ{i+1}{j+1}"
+            return s.lstrip("+")
+
+        def coord_line(name, M, dB):
+            den = np.sum(M ** 2)
+            terms = " ".join(num(M[i, j] * dB[i, j]) for i, j in nz(M))
+            val = np.sum(M * dB) / den
+            return f"{name}=({terms})/{den:g}={num(val)}", val
+
+        # Legend, printed once
+        print("Projection onto B* + uS + vK  (Frobenius inner product, S ⟂ K):")
+        print(f"  ΔB = B̂ − B*")
+        print(f"  u  = ⟨ΔB,S⟩/‖S‖² = ({symbolic(S)})/{np.sum(S**2):g}")
+        print(f"  v  = ⟨ΔB,K⟩/‖K‖² = ({symbolic(K)})/{np.sum(K**2):g}")
+        print(f"  d  = ‖ΔB − uS − vK‖_F   (part of B̂ outside the plane)")
+
+        B_true = next(iter(blocks.values()))["B*"][0]
+        for tc, mats in blocks.items():
+            headers, cols = [], []
+            for name, (B, n, _) in mats.items():
+                headers.append(name if n is None else f"{name} (n={n})")
+                lines = [mat_row(B[0]), mat_row(B[1])]
+                if name == "B*" or not np.all(np.isfinite(B)):
+                    lines += [""] * 5
+                else:
+                    dB = B - B_true
+                    lines += ["ΔB=" + mat_row(dB[0]), "   " + mat_row(dB[1])]
+                    u_line, u = coord_line("u", S, dB)
+                    v_line, v = coord_line("v", K, dB)
+                    R = dB - u * S - v * K
+                    res = [R[i, j] for i, j in np.ndindex(R.shape) if abs(R[i, j]) > 1e-12]
+                    d = np.linalg.norm(R)
+                    d_line = ("d=0" if not res else
+                            "d=√(" + "+".join(f"{abs(r):.{p}f}²" for r in res) + f")={d:.{p}f}")
+                    lines += [u_line, v_line, d_line]
+                cols.append(lines)
+            col_w = max(max(len(s) for s in L) for L in cols)
+            col_w = max(col_w, max(len(h) for h in headers)) + 3
+            print(f"\n=== Test case {tc} ===")
+            print("".join(h.ljust(col_w) for h in headers))
+            for k in range(len(cols[0])):
+                print("".join(L[k].ljust(col_w) for L in cols))
+
+    @staticmethod
+    def get_test_case_pairs(
+        method
+    ):
+        test_pairs = []
+
+        if method=='same_source':
+            # Add perfect model cases
+            test_pairs = test_pairs + [
+                comb for comb in itertools.combinations(['i','ii','iii','iv'], 2)
+            ]
+
+            # Add slightly misspecified model cases
+            test_pairs = test_pairs + [
+                comb for comb in itertools.combinations(['v','vi','vii','viii'], 2)
+            ]
+
+            # Add largely misspecified model cases
+            test_pairs = test_pairs + [
+                comb for comb in itertools.combinations(['ix','x','xi','xii'], 2)
+            ]
+
+        elif method=='same_prior':
+            # Add uniform prior cases
+            test_pairs = test_pairs + [
+                comb for comb in itertools.combinations(['i','v','ix'], 2)
+            ]
+
+            # Add low information correct prior cases
+            test_pairs = test_pairs + [
+                comb for comb in itertools.combinations(['ii','vi','x'], 2)
+            ]
+
+            # Add high information correct prior cases
+            test_pairs = test_pairs + [
+                comb for comb in itertools.combinations(['iii','vii','xi'], 2)
+            ]
+
+            # Add high information incorrect prior cases
+            test_pairs = test_pairs + [
+                comb for comb in itertools.combinations(['iv','viii','xii'], 2)
+            ]
+        else:
+            raise ValueError("'method must be one of 'same_source' or 'same_prior'. ")
+        
+        return test_pairs
+    
+
+class LocalSensitivityScores:
+    """
+        Escores (derivadas do log da densidade) para sensibilidade local.
+        score(samples, x, baseline_prior, baseline_source_model) -> array (K,)
+        Derivada em relação ao PRÓPRIO hiperparâmetro (alpha, sigma_p, nu_p,
+        mu_s, sigma_s, nu_s), no baseline. Sem derivadas em log(parâmetro)
+        nem em multiplicadores relativos (p = sigma/sigma0, r = nu/nu0).
+        Constantes omitidas (não afetam covariâncias):
+        sigma_p : -d/sigma_p
+        nu_p : 1/2[psi((nu+d)/2) - psi(nu/2) - d/nu] - d/(nu^2 sigma^2)
+        sigma_s : -L*N/sigma_s
+        nu_s : L*N{1/2[psi((nu+1)/2) - psi(nu/2) - 1/nu] - 1/(nu^2 sigma^2)}
+    """
+    @staticmethod
+    def _prior_terms(
+        samples,
+        prior
+    ):
+        # scale escalar: matriz de forma Sigma = scale^2 I (não é desvio-padrão)
+        center = np.asarray(prior.center, dtype=np.float64)
+        scale, df = float(prior.scale), float(prior.df)
+
+        # Obtém amostras centralizadas pela média da prior
+        R = samples - center
+        
+        # Argumento da Student-t
+        r = (R ** 2).sum(
+            axis=(1, 2)
+        ) / scale ** 2
+
+        return R, r, scale, df, center.size
+    
+
+    @staticmethod
+    def _source_terms(
+        samples,
+        x,
+        source,
+        chunk_size=500
+    ):
+        # Convert to float
+        mu, sigma, nu = float(source.mu), float(source.sigma), float(source.df)
+        
+        # Total samples
+        K = samples.shape[0]
+        
+        # Initialize dict for storing terms
+        out = {
+            k: np.empty(K) for k in (
+                'mu',
+                'sigma',
+                'nu_partial'
+            )
+        }
+
+        # Iterate over chunks
+        for a in range(0, K, chunk_size):
+            # Arguments for scores
+            z = (
+                np.einsum(
+                    'kij,jn->kin',
+                    samples[a:a + chunk_size], x
+                ) - mu
+            ) / sigma
+            q = nu + z ** 2
+
+            # d/d mu (completo)
+            out['mu'][a:a + chunk_size] = (
+                (nu + 1) * z / (sigma * q)
+            ).sum(axis=(1, 2))
+
+            # d/d sigma, sem a constante -L*N/sigma
+            out['sigma'][a:a + chunk_size] = (
+                (nu + 1) * z ** 2 / (sigma * q)
+            ).sum(axis=(1, 2))
+
+            # d/d nu com sigma fixo, sem os termos de digama
+            out['nu_partial'][a:a + chunk_size] = (
+                -0.5 * np.log1p(z ** 2 / nu) + (nu + 1) * z ** 2 / (2 * nu * q)
+            ).sum(
+                axis=(1, 2)
+            )
+
+        return out, sigma, nu
+    
+
+    @staticmethod
+    def _unit_variance_dsigma_dnu(sigma, nu):
+        # sigma(nu) = sqrt((nu-2)/nu) => dsigma/dnu = 1/(nu^2 sigma)
+        if nu <= 2:
+            raise ValueError('Trajetória de variância unitária exige df > 2.')
+        return 1.0 / (nu ** 2 * sigma)
+    
+
+    # ---------------- Priori ----------------
+    @staticmethod
+    def prior_mode_score(
+        direction
+    ):
+        # d/d alpha, center(alpha) = (1-alpha) B + alpha I => direction = I - B
+        direction = np.asarray(direction, dtype=np.float64)
+
+        def __prior_mode_score(
+            samples,
+            x,
+            baseline_prior,
+            baseline_source_model
+        ):
+            # Obtain prior terms
+            R, r, s, nu_B, L2 = LocalSensitivityScores._prior_terms(
+                samples, 
+                baseline_prior
+            )
+
+            grad_center = ((nu_B + L2) / (nu_B + r))[:, None, None] * R / s ** 2
+
+            return np.tensordot(
+                grad_center,
+                direction,
+                axes=([1, 2], [0, 1])
+            )
+        
+        return __prior_mode_score
+    
+
+    @staticmethod
+    def prior_scale_score(
+        samples,
+        x,
+        baseline_prior,
+        baseline_source_model
+    ):
+        # d/d sigma_p, sem a constante -d/sigma_p
+        R, r, s, nu, d = LocalSensitivityScores._prior_terms(
+            samples,
+            baseline_prior
+        )
+        
+        return (nu + d) * r / (s * (nu + r))
+    
+    @staticmethod
+    def prior_df_score(
+        samples,
+        x,
+        baseline_prior,
+        baseline_source_model
+    ):
+        """d/d nu_p ao longo de sigma_p(nu_p) = sqrt((nu_p-2)/nu_p)."""
+        R, r, s, nu, d = LocalSensitivityScores._prior_terms(
+            samples, 
+            baseline_prior
+        )
+        # Pure df variation
+        df_score = -0.5 * np.log1p(r / nu) + (nu + d) * r / (2 * nu * (nu + r))
+        
+        # Pure scale variation
+        scale_score = (nu + d) * r / (s * (nu + r)) # d/d sigma_p
+
+        return df_score + scale_score * LocalSensitivityScores._unit_variance_dsigma_dnu(s, nu)
+    
+
+    # ------------- Modelo das fontes -------------
+
+
+    @staticmethod
+    def source_mu_score(
+        samples,
+        x,
+        baseline_prior,
+        baseline_source_model
+    ):
+        # d/d mu_s
+        return LocalSensitivityScores._source_terms(
+            samples,
+            x,
+            baseline_source_model
+        )[0]['mu']
+    
+
+    @staticmethod
+    def source_sigma_score(
+        samples,
+        x,
+        baseline_prior,
+        baseline_source_model
+    ):
+        """d/d sigma_s (escala absoluta), sem a constante -L*N/sigma_s."""
+        out, sigma, nu = LocalSensitivityScores._source_terms(
+            samples,
+            x,
+            baseline_source_model
+        )
+        return out['sigma']
+    
+
+    @staticmethod
+    def source_df_score(
+        samples,
+        x,
+        baseline_prior,
+        baseline_source_model
+    ):
+        """d/d nu_s ao longo de sigma_s(nu_s) = sqrt((nu_s-2)/nu_s)."""
+        out, sigma, nu = LocalSensitivityScores._source_terms(
+            samples,
+            x,
+            baseline_source_model
+        )
+        return out['nu_partial'] + out['sigma'] * LocalSensitivityScores._unit_variance_dsigma_dnu(sigma, nu)
+
+
+class GenerateConfigs:
+
+    @staticmethod
+    def get_discrete_configs(
+        mode,
+        n_realizations,
+        base_output_path,
+        experiment_name,
+        experiment_dir,
+        create_folder_structure,
+        nsources,
+        nobs,
+        A,
+        B,
+        seed
+    ): 
+        def __get_general_configs(
+            mode,
+            n_realizations,
+            base_output_path,
+            experiment_name,
+            experiment_dir,
+            create_folder_structure,
+            nsources,
+            nobs,
+            A,
+            B,
+            seed
+        ):
+            
+            if mode=='narrow':
+                __n_realizations=n_realizations
+            elif mode=='broad':
+                __n_realizations=1
+            else:
+                raise ValueError("mode argument must be either 'narrow' or 'broad'.")
+
+            return {
+                # General output directory
+                'base_output_path': base_output_path,
+                # Experiment name for folder structure
+                'experiment_name': experiment_name,
+                # Experiment directory
+                'experiment_dir': experiment_dir,
+                # Whether or not to create folder structure
+                'create_folder_structure': create_folder_structure,
+                # Whether or not to save graphs
+                'save_graphs': False,
+                # Number of sources
+                'n_sources': nsources,
+                # Number of observations in each realization
+                'n_obs': nobs,
+                # Number of parallel workers
+                'n_workers': os.cpu_count(),
+                # Number of parallel realizations to run
+                'n_realizations': __n_realizations,
+                # Mixing matrix
+                'A': A,
+                # Separating matrix
+                'B': B,
+                # Initial condition
+                'initial_B': B,
+                # Whether or not to use a normalized posterior
+                'normalize_posterior': True,
+                # Whether or not to have a progress bar for each initialization test case
+                'initialization_progress_bar': False,
+                # Whether or not to have a progress bar for each realization
+                'realizations_progress_bar': True,
+                # Master seed
+                'seed': seed
+            }
+        
+        def __get_initialization_configs(mode):
+            if mode=='narrow':
+                return {
+                    'strategy': 'gmm',
+                    'starting_value_experiment': 'CBA_SBRT_broad_analysis'
+                }
+            elif mode=='broad':
+                return {
+                    'strategy': 'random',
+                    'starting_value_experiment': 'posterior_broad_analysis_low_var_1M'
+                }
+        
+
+        def __get_contour_configs(mode):
+
+            if mode=='narrow':
+                grid_points=401
+            elif mode=='broad':
+                grid_points=3
+
+            return {
+                'perfect_model':{
+                    # Number of points used in contour line grids
+                    'contour_grid_points': grid_points,
+                    # Exploration limits for grids
+                    'u_lims':(-0.4, 0.4),
+                    'v_lims':(-0.4, 0.4),
+                    # Central point
+                    'central_point': (0,0)
+                },
+                'slightly_misspecified_model':{
+                    # Number of points used in contour line grids
+                    'contour_grid_points': grid_points,
+                    # Exploration limits for grids
+                    'u_lims':(-0.4, 0.4),
+                    'v_lims':(-0.4, 0.4),
+                    # Central point
+                    'central_point': (0,0)
+                },
+                'largely_misspecified_model':{
+                    # Number of points used in contour line grids
+                    'contour_grid_points': grid_points,
+                    # Exploration limits for grids
+                    'u_lims':(-0.8, 0.0),
+                    'v_lims':(0.7, 1.5),
+                    # Central point
+                    'central_point': (-0.4,1.1)
+                },
+            }
+
+        def __get_map_configs(mode):
+
+            if mode=='narrow':
+                max_it=1500000
+                min_it=1000
+            elif mode=='broad':
+                max_it=2
+                min_it=1
+            
+            return {
+                # Threshold for stopping optimization
+                'stopping_thresh': 1E-11,
+                # Maximum number of iterations
+                'max_it': max_it,
+                # Minimum iterations
+                'min_it': min_it,
+                # Learning rate
+                'learning_rate': 1E-6,
+                # Persistance iterations for stopping criterion
+                'stopping_criterion_persistance_its': 20
+            }
+        
+        def __get_mcmc_configs(mode):
+
+            if mode=='narrow':
+                scale=0.1
+                exploration_var=5E-4
+                n_samples=30000
+                parallel_chains=4
+                max_it=20000
+                R_hat_minimum_burn_in=2000
+                auto_adjust_exploration_var=True
+            elif mode=='broad':
+                scale=10
+                exploration_var=1E-4
+                n_samples=100000
+                parallel_chains=100
+                max_it=25000
+                R_hat_minimum_burn_in=10000
+                auto_adjust_exploration_var=False
+            
+            return {
+                # Initial condition noise
+                'starting_distribution': lambda: st.t.rvs(
+                    loc=0,
+                    scale=scale,
+                    df=3,
+                    size=B.shape
+                ),
+                # Exploration variance for MCMC
+                'exploration_var': exploration_var,
+                # Number of samples to generate
+                'n_samples': n_samples,
+                # Number of parallel chains for MCMC
+                'parallel_chains': parallel_chains,
+                # Maximum iterations for MCMC
+                'max_it':max_it,
+                # Convergence threshold for R-hat diagnostic
+                'R_hat_thresh': 1.01,
+                # Interval at which R-hat will be evaluated
+                'R_hat_evaluation_step': 500,
+                # Number of consecutive convergent evaluations necessary
+                'R_hat_persistance': 2,
+                # Samples which will be discarded
+                'R_hat_minimum_burn_in': R_hat_minimum_burn_in,
+                # Whether or not to adjust exploration variance inside MCMC
+                'auto_adjust_exploration_var': auto_adjust_exploration_var,
+                # Whether or not to show progress bars
+                'progress_bar': False,
+                # Target acceptance probability, in case auto adjust is enabled
+                'target_accept_prob': 0.5,
+
+            }
+        
+        def __get_sim_configs(
+            B,
+            nsources
+        ):
+            return {
+                'source_model': StandardLogisticSource(use_jax=True),
+                'sources': {
+                    'perfect_model': StandardLogisticSource(use_jax=True),
+                    'slightly_misspecified_model': LogisticSource(
+                        mu=0.1,
+                        sigma=1.1,
+                        use_jax=True
+                    ),
+                    'largely_misspecified_model': TriangularSource(
+                        lower=-2,
+                        upper=2,
+                        mode=0,
+                        use_jax=True
+                    )
+                },
+                'priors': {
+                    'likelihood': ExponentialPrior(
+                        center=B,
+                        std=np.inf,
+                        use_jax=True
+                    ),
+                    'non_informative_prior': ExponentialPrior(
+                        center=B,
+                        std=10,
+                        use_jax=True
+                    ),
+                    'informative_prior': ExponentialPrior(
+                        center=B,
+                        std=0.1,
+                        use_jax=True
+                    ),
+                    'identity_transform': ExponentialPrior(
+                        center=np.eye(nsources),
+                        std=0.1,
+                        use_jax=True
+                    )
+                },
+                'test_cases': {
+                    'i': {
+                        'source': 'perfect_model',
+                        'prior': 'likelihood',
+                    },
+                    'ii': {
+                        'source': 'perfect_model',
+                        'prior': 'non_informative_prior',
+                    },
+                    'iii': {
+                        'source': 'perfect_model',
+                        'prior': 'informative_prior',
+                    },
+                    'iv': {
+                        'source': 'perfect_model',
+                        'prior': 'identity_transform',
+                    },
+                    'v': {
+                        'source': 'slightly_misspecified_model',
+                        'prior': 'likelihood',
+                    },
+                    'vi': {
+                        'source': 'slightly_misspecified_model',
+                        'prior': 'non_informative_prior',
+                    },
+                    'vii': {
+                        'source': 'slightly_misspecified_model',
+                        'prior': 'informative_prior',
+                    },
+                    'viii': {
+                        'source': 'slightly_misspecified_model',
+                        'prior': 'identity_transform',
+                    },
+                    'ix': {
+                        'source': 'largely_misspecified_model',
+                        'prior': 'likelihood',
+                    },
+                    'x': {
+                        'source': 'largely_misspecified_model',
+                        'prior': 'non_informative_prior',
+                    },
+                    'xi': {
+                        'source': 'largely_misspecified_model',
+                        'prior': 'informative_prior',
+                    },
+                    'xii': {
+                        'source': 'largely_misspecified_model',
+                        'prior': 'identity_transform',
+                    }
+                }
+            }
+        
+
+        configs = {}
+
+        # Add general configs
+        configs['general'] = __get_general_configs(
+            mode=mode,
+            n_realizations=n_realizations,
+            base_output_path=base_output_path,
+            experiment_name=experiment_name,
+            experiment_dir=experiment_dir,
+            create_folder_structure=create_folder_structure,
+            nsources=nsources,
+            nobs=nobs,
+            A=A,
+            B=B,
+            seed=seed
+        )
+
+        # Add initialization configs
+        configs['initialization'] = __get_initialization_configs(mode=mode)
+
+        # Add contour configs
+        configs['contour'] = __get_contour_configs(mode=mode)
+
+        # Add MAP configs
+        configs['map'] = __get_map_configs(mode=mode)
+
+        # Add MCMC configs
+        configs['mcmc'] = __get_mcmc_configs(mode=mode)
+
+        # Add simulation configs
+        configs['sim'] = __get_sim_configs(
+            B=B,
+            nsources=nsources
+        )
+
+        return configs
+
+
+    @staticmethod
+    def get_continuous_configs(
+        n_realizations,
+        base_output_path,
+        experiment_name,
+        experiment_dir,
+        create_folder_structure,
+        nsources,
+        nobs,
+        A,
+        B,
+        source_dfs,
+        seed
+    ):
+        def __get_general_configs(
+            n_realizations,
+            base_output_path,
+            experiment_name,
+            experiment_dir,
+            create_folder_structure,
+            nsources,
+            nobs,
+            A,
+            B,
+            seed
+        ):
+            return {
+                # General output directory
+                'base_output_path': base_output_path,
+                # Experiment name for folder structure
+                'experiment_name': experiment_name,
+                # Experiment directory
+                'experiment_dir': experiment_dir,
+                # Whether or not to create folder structure
+                'create_folder_structure': create_folder_structure,
+                # Whether or not to save graphs
+                'save_graphs': False,
+                # Number of sources
+                'n_sources': nsources,
+                # Number of observations in each realization
+                'n_obs': nobs,
+                # Number of parallel workers
+                'n_workers': os.cpu_count(),
+                # Number of parallel realizations to run
+                'n_realizations': n_realizations,
+                # Mixing matrix
+                'A': A,
+                # Separating matrix
+                'B': B,
+                # Initial condition
+                'initial_B': B,
+                # Whether or not to use a normalized posterior
+                'normalize_posterior': True,
+                # Whether or not to have a progress bar for each initialization test case
+                'initialization_progress_bar': False,
+                # Whether or not to have a progress bar for each realization
+                'realizations_progress_bar': True,
+                # Master seed
+                'seed': seed
+            }
+        
+        def __get_prior_variation_configs(
+            nsources,
+            B
+        ):
+            return {
+                'mode':{
+                    'base_prior': MultivariateTPrior(
+                        center=0.5*(B + np.eye(nsources)),
+                        scale=np.sqrt(1/3),
+                        df=3,
+                        use_jax=True
+                    ),
+                    'target_param_values': np.linspace(
+                        start=0,
+                        stop=1,
+                        num=25
+                    ),
+                    'target_param_fn': lambda target_params: [
+                        MultivariateTPrior(
+                            center=(1-p)*B + p*np.eye(nsources),
+                            scale=np.sqrt(1/3),
+                            df=3,
+                            use_jax=True
+                        ) for p in target_params
+                    ],
+                    'score_fn': LocalSensitivityScores.prior_mode_score(
+                        direction=np.eye(nsources)-B
+                    )
+                },
+                'scale':{
+                    'base_prior': MultivariateTPrior(
+                        center=B,
+                        scale=1E-1,
+                        df=3,
+                        use_jax=True
+                    ),
+                    'target_param_values': np.logspace(
+                        start=np.log10(0.05),
+                        stop=0,
+                        num=25,
+                        base=10
+                    ),
+                    'target_param_fn': lambda target_params: [
+                        MultivariateTPrior(
+                            center=B,
+                            scale=p,
+                            df=3,
+                            use_jax=True
+                        ) for p in target_params
+                    ],
+                    'score_fn': LocalSensitivityScores.prior_scale_score
+                },
+                'tail_heaviness': {
+                    'base_prior': MultivariateTPrior(
+                        center=B,
+                        scale=np.sqrt(1/3),
+                        df=3,
+                        use_jax=True
+                    ),
+                    'target_param_values': range(3, 30),
+                    'target_param_fn': lambda target_params: [
+                        MultivariateTPrior(
+                            center=B,
+                            scale=np.sqrt((p - 2) / p),
+                            df=p,
+                            use_jax=True
+                        )
+                        for p in target_params
+                    ],
+                    'score_fn': LocalSensitivityScores.prior_df_score
+                },
+            }
+        
+        def __get_source_model_variation_configs(
+            B
+        ):
+            return {
+                'mode':{
+                    'param_name': 'mu',
+                    'base_prior': MultivariateTPrior(
+                        center=B,
+                        scale=np.sqrt(1/3),
+                        df=3,
+                        use_jax=True
+                    ),
+                    'target_param_values': np.linspace(
+                        start=-0.2,
+                        stop=0.2,
+                        num=25
+                    ),
+                    'target_param_fn': lambda baseline_objs, target_params, param_name: [
+                        setattr(
+                            b_obj,
+                            param_name,
+                            p
+                        ) for b_obj, p in zip(
+                            baseline_objs,
+                            target_params
+                        )
+                    ],
+                    'score_fn': LocalSensitivityScores.source_mu_score
+                },
+                'scale':{
+                    'param_name': 'sigma',
+                    'base_prior': MultivariateTPrior(
+                        center=B,
+                        scale=np.sqrt(1/3),
+                        df=3,
+                        use_jax=True
+                    ),
+                    'target_param_values': np.linspace(
+                        0.97,
+                        1.03,
+                        25
+                    ),
+                    'target_param_fn': lambda baseline_objs, target_params, param_name: [
+                        setattr(
+                            b_obj,
+                            param_name,
+                            b_obj.sigma*p
+                        ) for b_obj, p in zip(
+                            baseline_objs,
+                            target_params
+                        )
+                    ],
+                    'score_fn': LocalSensitivityScores.source_sigma_score
+                },
+                'tail_heaviness': {
+                    'param_name': 'df',
+                    'base_prior': MultivariateTPrior(
+                        center=B,
+                        scale=np.sqrt(1/3),
+                        df=3,
+                        use_jax=True
+                    ),
+                    'target_param_values': np.linspace(
+                        0.95,
+                        1.05,
+                        25
+                    ),
+                    'target_param_fn': lambda baseline_objs, target_params, param_name: [
+                        (
+                            setattr(
+                                b_obj,
+                                'df',
+                                float(b_obj.df) * r
+                            ),                       
+                            setattr(
+                                b_obj,
+                                'sigma',
+                                np.sqrt((b_obj.df - 2) / b_obj.df)
+                            )      # usa o df novo
+                        ) for b_obj, r in zip(baseline_objs, target_params)
+                    ],
+                    'score_fn': LocalSensitivityScores.source_df_score
+                },
+            }
+            
+        def __get_prior_source_model_variation_configs():
+            return {}
+        
+
+        def __get_mcmc_configs():
+            return {
+                # Initial condition noise
+                'starting_distribution': lambda: st.t.rvs(
+                    loc=0,
+                    scale=0.05,
+                    df=3,
+                    size=B.shape
+                ),
+                # Exploration variance for MCMC
+                'exploration_var': 1E-4,
+                # Number of samples to generate
+                'n_samples': 30000,
+                # Number of parallel chains for MCMC
+                'parallel_chains': 4,
+                # Maximum iterations for MCMC
+                'max_it': 20000,
+                # Convergence threshold for R-hat diagnostic
+                'R_hat_thresh': 1.01,
+                # Interval at which R-hat will be evaluated
+                'R_hat_evaluation_step': 500,
+                # Number of consecutive convergent evaluations necessary
+                'R_hat_persistance': 2,
+                # Samples which will be discarded
+                'R_hat_minimum_burn_in': 5000,
+                # Whether or not to adjust exploration variance inside MCMC
+                'auto_adjust_exploration_var': True,
+                # Whether or not to show progress bars
+                'progress_bar': False,
+                # Target acceptance probability, in case auto adjust is enabled
+                'target_accept_prob': 0.5,
+            }
+        
+        def __get_sources_configs(
+            source_dfs
+        ):
+            return {
+                'rs{}'.format(s+1): StudentTSource(
+                    mu=0,
+                    sigma=np.sqrt((df-2)/df),
+                    df=df,
+                    use_jax=True
+                ) for s, df in enumerate(source_dfs)
+            }
+
+
+        configs = {}
+
+        # Add general configs
+        configs['general'] = __get_general_configs(
+            n_realizations=n_realizations,
+            base_output_path=base_output_path,
+            experiment_name=experiment_name,
+            experiment_dir=experiment_dir,
+            create_folder_structure=create_folder_structure,
+            nsources=nsources,
+            nobs=nobs,
+            A=A,
+            B=B,
+            seed=seed
+        )
+
+        # Add prior variation configs
+        configs['prior_variation'] = __get_prior_variation_configs(
+            nsources=nsources,
+            B=B
+        )
+
+        # Add source model variation configs
+        configs['source_model_variation'] = __get_source_model_variation_configs(
+            B=B
+        )
+
+        # Add prior + source model variation configs
+        configs['prior_source_model_variation'] = __get_prior_source_model_variation_configs()
+
+        # Add mcmc configs
+        configs['mcmc'] = __get_mcmc_configs()
+
+        # Add sources configs
+        configs['sources'] = __get_sources_configs(
+            source_dfs=source_dfs
+        )
+
+        return configs
 
 class SignalGraphPlotter:
 
@@ -703,7 +1795,7 @@ class MCMCGraphPlotter:
                 color='limegreen',
                 linestyle='--',
                 linewidth=4,
-                label='$\hat{b}_{11}$'
+                label=r'$\hat{b}_{11}$'
             )
             
         axs[0,0].set_xlabel(
@@ -760,7 +1852,7 @@ class MCMCGraphPlotter:
                 color='limegreen',
                 linestyle='--',
                 linewidth=4,
-                label='$\hat{b}_{12}$'
+                label=r'$\hat{b}_{12}$'
             )
         axs[0,1].set_xlabel(
             '$b_{12}$',
@@ -815,7 +1907,7 @@ class MCMCGraphPlotter:
                 color='limegreen',
                 linestyle='--',
                 linewidth=4,
-                label='$\hat{b}_{21}$'
+                label=r'$\hat{b}_{21}$'
             )
         axs[1,0].set_xlabel(
             '$b_{21}$',
@@ -870,7 +1962,7 @@ class MCMCGraphPlotter:
                 color='limegreen',
                 linestyle='--',
                 linewidth=4,
-                label='$\hat{b}_{22}$'
+                label=r'$\hat{b}_{22}$'
             )
         axs[1,1].set_xlabel(
             '$b_{22}$',
@@ -996,7 +2088,7 @@ class MCMCGraphPlotter:
         axs[0,0].plot(
             t[plot_start:plot_end],
             s_est[0,plot_start:plot_end],
-            label='$\hat{s}_{0}$',
+            label=r'$\hat{s}_{0}$',
             color='red',
             linestyle='--'
         )
@@ -1034,7 +2126,7 @@ class MCMCGraphPlotter:
             fontsize=label_size
         )
         axs[0,1].set_ylabel(
-            '$\hat{s}_{0}$',
+            r'$\hat{s}_{0}$',
             fontsize=label_size
         )
         axs[0,1].set_title(
@@ -1055,7 +2147,7 @@ class MCMCGraphPlotter:
         axs[1,0].plot(
             t[plot_start:plot_end],
             s_est[1,plot_start:plot_end],
-            label='$\hat{s}_{1}$',
+            label=r'$\hat{s}_{1}$',
             color='red',
             linestyle='--'
         )
@@ -1093,7 +2185,7 @@ class MCMCGraphPlotter:
             fontsize=label_size
         )
         axs[1,1].set_ylabel(
-            '$\hat{s}_{1}$',
+            r'$\hat{s}_{1}$',
             fontsize=label_size
         )
         axs[1,1].set_title(
@@ -1183,7 +2275,7 @@ class MAPGradientAscentGraphPlotter:
             y='detB'
         )
         plt.ylabel(
-            '$\det(\hat{B})$',
+            r'$\det(\hat{B})$',
             fontsize=label_size
         )
         plt.xlabel(
@@ -1234,7 +2326,7 @@ class MAPGradientAscentGraphPlotter:
             )
         
         plt.ylabel(
-            '$d \;\log P(\hat{B}|X)/d \; bij$',
+            r'$d \;\log P(\hat{B}|X)/d \; bij$',
             fontsize=label_size
         )
         plt.xlabel(
@@ -1300,7 +2392,7 @@ class MAPGradientAscentGraphPlotter:
         axs[0,0].plot(
             t[plot_start:plot_end],
             s_est[0,plot_start:plot_end],
-            label='$\hat{s}_{0}$',
+            label=r'$\hat{s}_{0}$',
             color='red',
             linestyle='--'
         )
@@ -1338,7 +2430,7 @@ class MAPGradientAscentGraphPlotter:
             fontsize=label_size
         )
         axs[0,1].set_ylabel(
-            '$\hat{s}_{0}$',
+            r'$\hat{s}_{0}$',
             fontsize=label_size
         )
         axs[0,1].set_title(
@@ -1359,7 +2451,7 @@ class MAPGradientAscentGraphPlotter:
         axs[1,0].plot(
             t[plot_start:plot_end],
             s_est[1,plot_start:plot_end],
-            label='$\hat{s}_{1}$',
+            label=r'$\hat{s}_{1}$',
             color='red',
             linestyle='--'
         )
@@ -1397,7 +2489,7 @@ class MAPGradientAscentGraphPlotter:
             fontsize=label_size
         )
         axs[1,1].set_ylabel(
-            '$\hat{s}_{1}$',
+            r'$\hat{s}_{1}$',
             fontsize=label_size
         )
         axs[1,1].set_title(
