@@ -99,22 +99,11 @@ class BayesianEstimators:
         x,
         mmse_configs,
         map_configs,
-        initial_conditions
+        initial_conditions,
+        seed=0
     ):
         
         # Initialize MH estimator
-        # mmse_estimator = MMSEMetropolisHastingsEstimator(
-        #     n_samples=mmse_configs['n_samples'],
-        #     source_pdf_fn=mmse_configs['source_pdf_fn'],
-        #     prior_pdf_fn=mmse_configs['prior_pdf_fn'],
-        #     exploration_var=mmse_configs['exploration_var'],
-        #     parallel_chains=mmse_configs['parallel_chains'],
-        #     max_it=mmse_configs['max_it'],
-        #     R_hat_thresh=mmse_configs['R_hat_thresh'],
-        #     R_hat_evaluation_step=mmse_configs['R_hat_evaluation_step'],
-        #     R_hat_persistance=mmse_configs['R_hat_persistance'],
-        #     R_hat_minimum_burn_in=mmse_configs['R_hat_minimum_burn_in']
-        # )
         start_mmse = time.time_ns()
         mmse_estimator = MMSEBarkerMHEstimator(
             n_samples=mmse_configs['n_samples'],
@@ -135,7 +124,8 @@ class BayesianEstimators:
             # Execute MCMC estimation
             mmse_estimator.fit(
                 x=x,
-                initial_condition=initial_conditions['mmse']
+                initial_condition=initial_conditions['mmse'],
+                seed=seed
             )
         end_mmse = time.time_ns()
         logger.info('Time spent in MCMC (seconds): {}'.format(round((end_mmse-start_mmse)/1E9, 2)))
@@ -167,7 +157,6 @@ class BayesianEstimators:
         end_map = time.time_ns()
 
         logger.info('Time spent in Gradient Ascent (seconds): {}'.format(round((end_map-start_map)/1E9, 2)))
-        # jax_buffer_report(f"GA run")
 
         return mmse_estimator, map_estimator
 
@@ -236,7 +225,6 @@ class MAPGradientAscentEstimator:
             # Inicialização aleatória de B
             B = initial_value
             logs = pd.DataFrame()
-
             continue_opt=True
             n=0
             last_posteriori = -np.inf
@@ -250,18 +238,6 @@ class MAPGradientAscentEstimator:
                 y=B@x
                 g = source_pdf_derivative(y)/source_pdf(y)
                 deltaB = deltaB + g@x.T
-                # import pdb; pdb.set_trace()
-                # for t in range(NOBS):
-                #     x_t = x[:,t]
-                #     y_t = B@x_t
-                #     g_y = np.array([
-                #         source_pdf_derivative(y_t_i)/source_pdf(y_t_i) for y_t_i in y_t
-                #     ]).reshape((NSOURCES,1))
-                #     deltaB = deltaB + (g_y@x_t.reshape((1,NSOURCES)))
-                
-                # Normalize posterior update, if so specified
-                # if self.normalize_posterior:
-                #     deltaB = deltaB/NOBS
 
                 # Atualização de matriz de separação B
                 B = B + learning_rate*deltaB
@@ -304,6 +280,8 @@ class MAPGradientAscentEstimator:
                     last_posteriori=posteriori
             
             logs = pd.DataFrame(logs_list)
+
+            self.converged = len(logs) < self.max_it
             
             return np.array(B), logs
             
@@ -826,7 +804,8 @@ class MMSEBarkerMHEstimator:
     def fit(
         self,
         x,
-        initial_condition
+        initial_condition,
+        seed=0
     ):
         def __get_samples(
             mcmc,
@@ -841,7 +820,7 @@ class MMSEBarkerMHEstimator:
             # Continue from the last adapted state when this is not the warm-up block
             if warmup:
                 mcmc.warmup(
-                    jax.random.PRNGKey(0),
+                    jax.random.PRNGKey(seed),
                     init_params=init_params,
                     extra_fields=('accept_prob','potential_energy'),
                     collect_warmup=True
@@ -999,15 +978,18 @@ class MMSEBarkerMHEstimator:
             # If at least R_hat_persistance evaluations held:
             # else:
             if it < self.max_it:
-                # Evaluate if all R_hats converged for R_hat_persistance evaluations
-                R_hat_cols = [c for c in diagnostics_df.columns if 'r_hat' in c]
-                if np.all(
-                    diagnostics_df[
-                        R_hat_cols
-                    ].values[-self.R_hat_persistance:,:] < self.R_hat_thresh
-                ):
-                    stop=True
-                    self.converged=True
+                if it > self.n_samples_per_chain + self.R_hat_minimum_burn_in + (self.R_hat_persistance - 1) * self.R_hat_evaluation_step:
+                    # Evaluate if all R_hats converged for R_hat_persistance evaluations
+                    R_hat_cols = [c for c in diagnostics_df.columns if 'r_hat' in c]
+                    if np.all(
+                        diagnostics_df[
+                            R_hat_cols
+                        ].values[-self.R_hat_persistance:,:] < self.R_hat_thresh
+                    ):
+                        stop=True
+                        self.converged=True
+                    else:
+                        stop=False
                 else:
                     stop=False
             # Evaluate maximum iterations
@@ -1024,12 +1006,50 @@ class MMSEBarkerMHEstimator:
             diagnostics_df,
             logs
         ):
+            def __get_moments(
+                samples
+            ):
+                
+                # Get mean
+                B_mean = np.mean(
+                    samples,
+                    axis=0
+                )
+
+                # Differences wrt mean
+                mean_diffs = samples - B_mean
+
+                # Get variance 
+                B_var  = np.mean(
+                    mean_diffs**2,
+                    axis=0
+                )
+
+                # Get skew 
+                B_skew = np.mean(
+                    mean_diffs**3,
+                    axis=0
+                )/(B_var**1.5)
+
+                # Get kurtosis 
+                B_kurt = np.mean(
+                    mean_diffs**4,
+                    axis=0
+                )/(B_var**2)
+
+                return B_mean, B_var, B_skew, B_kurt
+            
             # Merge samples from different chains into one vector (stationary window)
             merged_samples = np.concatenate(
                 [
                     s[-self.n_samples_per_chain:,:,:] for s in chains_samples
                 ],
                 axis=0
+            )
+
+            # Get moments
+            B_mean, B_var, B_skew, B_kurt = __get_moments(
+                samples=merged_samples
             )
 
             # Get index for which maximum posterior was found (stationary window)
@@ -1042,11 +1062,11 @@ class MMSEBarkerMHEstimator:
             max_posterior = logs.loc[max_posterior_idx]['log_posterior']
             # max_posterior_B = logs.loc[max_posterior_idx]['B_sample']
 
-            # Get Monte Carlo MMSE estimate
-            B_est_mmse = np.mean(
-                merged_samples,
-                axis=0
-            )
+            # # Get Monte Carlo MMSE estimate
+            # B_est_mmse = np.mean(
+            #     merged_samples,
+            #     axis=0
+            # )
 
             # Average alpha in stationarity
             average_alpha = stationary.alpha.mean()
@@ -1056,7 +1076,10 @@ class MMSEBarkerMHEstimator:
                 'samples': merged_samples,
                 'diagnostics': diagnostics_df,
                 'logs': logs,
-                'B_est': B_est_mmse,
+                'B_est': B_mean,
+                'B_var': B_var,
+                'B_skew': B_skew,
+                'B_kurt': B_kurt,
                 'max_posterior': max_posterior,
                 # 'max_posterior_B': max_posterior_B,
                 'average_alpha': average_alpha
@@ -1257,6 +1280,12 @@ class ImportanceSamplingEstimator:
         for i, x in enumerate(lw_out.T if lw_out.ndim == 2 else lw_out[None, :]):
             # improve numerical accuracy
             x -= np.max(x)
+            if np.ptp(x) < 1e-12:
+                # alvo = base: pesos constantes, nenhuma cauda a ajustar
+                x -= cls.__sumlogs(x)
+                kss[i] = 0.0
+                cutoff_ind, expxcutoff, sigma = cutoff_ind, 1.0, 0.0
+                continue
             # sort the array
             x_sort_ind = np.argsort(x)
             # divide log weights into body and right tail
@@ -1271,6 +1300,7 @@ class ImportanceSamplingEstimator:
             if n2 <= 4:
                 # not enough tail samples for gpdfitnew
                 k = np.inf
+                sigma = np.inf
             else:
                 # order of tail samples
                 x2si = np.argsort(x2)
@@ -1298,8 +1328,8 @@ class ImportanceSamplingEstimator:
         # If the provided input array is one dimensional, return kss as scalar.
         if lw_out.ndim == 1:
             kss = kss[0]
-
-        return lw_out, kss
+        
+        return lw_out, kss, cutoff_ind, expxcutoff, sigma
 
     @classmethod
     def __gpdfitnew(
@@ -1394,10 +1424,11 @@ class ImportanceSamplingEstimator:
         L -= 1
         L *= n
 
-        temp = L - L[:,None]
-        np.exp(temp, out=temp)
-        w = np.sum(temp, axis=1)
-        np.divide(1, w, out=w)
+        # temp = L - L[:,None]
+        # np.exp(temp, out=temp)
+        # w = np.sum(temp, axis=1)
+        # np.divide(1, w, out=w)
+        w = np.exp(L - np.logaddexp.reduce(L))
 
         # remove negligible weights
         dii = w >= 10 * np.finfo(float).eps
@@ -1516,6 +1547,60 @@ class ImportanceSamplingEstimator:
             out = np.log(out)
         out += np.squeeze(maxx)
         return out
+    
+    @classmethod
+    def __get_local_sensitivity(
+        cls,
+        samples,
+        scores,
+        n_batches=None
+    ):
+        """
+            Derivadas, no ponto base, de média, variância, assimetria e curtose de cada b_ij
+            em relação ao hiperparâmetro cujo escore é `scores` (K,):
+                d mean = Cov(b, g)
+                d M2   = Cov((b-mean)^2, g)
+                d M3   = Cov((b-mean)^3, g) - 3 M2 d mean
+                d M4   = Cov((b-mean)^4, g) - 4 M3 d mean
+            Mesmas convenções de __get_moments (assimetria padronizada, curtose não excedente).
+            MCSE por batch means (amostras em ordem de cadeia: use múltiplo de n_chains).
+        """
+        def __derivatives(b, g):
+            gc = g - g.mean()
+            cov = lambda f: np.tensordot(gc, f, axes=1)/len(g)
+            mean = b.mean(axis=0)
+            D = b - mean
+            M2, M3, M4 = (D**2).mean(0), (D**3).mean(0), (D**4).mean(0)
+            d_mean = cov(b)
+            d_M2 = cov(D**2)
+            d_M3 = cov(D**3) - 3*M2*d_mean
+            d_M4 = cov(D**4) - 4*M3*d_mean
+            skew, kurt = M3/M2**1.5, M4/M2**2
+            return (
+                {'mean': mean, 'var': M2, 'skew': skew, 'kurt': kurt},
+                {
+                    'mean': d_mean,
+                    'var': d_M2,
+                    'skew': d_M3/M2**1.5 - 1.5*skew*d_M2/M2,
+                    'kurt': d_M4/M2**2 - 2.0*kurt*d_M2/M2
+                }
+            )
+        samples = np.asarray(samples, dtype=np.float64)
+        scores = np.asarray(scores, dtype=np.float64)
+        moments, derivatives = __derivatives(samples, scores)
+        result = {'moments': moments, 'derivatives': derivatives}
+        if n_batches is not None and n_batches > 1:
+            edges = np.linspace(0, len(scores), n_batches+1).astype(int)
+            batches = [
+                __derivatives(samples[a:b], scores[a:b])[1]
+                for a, b in zip(edges[:-1], edges[1:])
+            ]
+            result['mcse'] = {
+                m: np.std([bt[m] for bt in batches], axis=0, ddof=1)/np.sqrt(n_batches)
+                for m in derivatives
+            }
+        return result
+
 
     @classmethod
     def __resolve_experiment(
@@ -1561,13 +1646,15 @@ class ImportanceSamplingEstimator:
             impsamp_configs['source_model_variation'] = {
                 'targets': [
                     PosteriorUtilities.get_log_posterior_fn(
-                        source_pdf_fn=sm,
-                        prior_pdf_fn=lambda B: 1
+                        source_pdf_fn=sm.get(),
+                        prior_pdf_fn=baseline_prior.get(),
+                        use_jax=True
                     ) for sm in target_source_models
                 ],
                 'baseline': PosteriorUtilities.get_log_posterior_fn(
                     source_pdf_fn=baseline_source_model.get(),
-                    prior_pdf_fn=lambda B: 1
+                    prior_pdf_fn=baseline_prior.get(),
+                    use_jax=True
                 ),
                 'params': source_model_control_params
             }
@@ -1583,7 +1670,8 @@ class ImportanceSamplingEstimator:
                 'targets': [
                     PosteriorUtilities.get_log_posterior_fn(
                         source_pdf_fn=sm.get(),
-                        prior_pdf_fn=p.get()
+                        prior_pdf_fn=p.get(),
+                        use_jax=True
                     ) for p, sm in itertools.product(
                         target_priors,
                         target_source_models
@@ -1591,7 +1679,8 @@ class ImportanceSamplingEstimator:
                 ],
                 'baseline': PosteriorUtilities.get_log_posterior_fn(
                     source_pdf_fn=baseline_source_model.get(),
-                    prior_pdf_fn=baseline_prior.get()
+                    prior_pdf_fn=baseline_prior.get(),
+                    use_jax=True
                 ),
                 'params': itertools.product(
                     prior_control_params,
@@ -1616,43 +1705,93 @@ class ImportanceSamplingEstimator:
             baseline_prior,
             target_prior
         ):
-            return np.asarray(
-                target_prior(B=samples)/baseline_prior(B=samples)
+            return np.log(
+                target_prior(B=samples)
+            ) - np.log(
+                baseline_prior(B=samples)
             )
             
         def __get_one_posterior(
             samples,
-            baseline_post,
-            x,
-            post
+            baseline_posterior,
+            target_posterior,
+            x
         ):
-            w_p=[]
-            for B_k in samples:
-                weight = post(
-                    x=x,
-                    B=B_k
-                ) - baseline_post(
-                    x=x,
-                    B=B_k
-                )
-                w_p.append(weight)
-
-            return np.exp(w_p)
+            return target_posterior(
+                B=samples,
+                x=x
+            ) - baseline_posterior(
+                B=samples,
+                x=x
+            )
             
         
         impsamp_results = cls.impsamp_configs
-        # Ge weights for prior variation analysis
+        # Get weights for prior variation analysis
         if 'prior_variation' in impsamp_results.keys():
             impsamp_results['prior_variation']['raw_weights'] = []
             impsamp_results['prior_variation']['weights'] = []
             if run_psis:
                 impsamp_results['prior_variation']['k_hat'] = []
+                impsamp_results['prior_variation']['cutoff_idx'] = []
+                impsamp_results['prior_variation']['cutoff_value'] = []
+                impsamp_results['prior_variation']['sigma'] = []
             for target_prior in impsamp_results['prior_variation']['targets']:
                 # Get raw weights
+                start_rw = time.time_ns()
                 raw_weights = __get_one_prior(
                     samples=samples,
                     baseline_prior=impsamp_results['prior_variation']['baseline'],
                     target_prior=target_prior
+                )
+                end_rw = time.time_ns()
+                logger.info('Time spent calculating raw weights (seconds): {}'.format(round((end_rw-start_rw)/1E9, 2)))
+
+                # Get final weights
+                if not run_psis:
+                    weights = raw_weights
+                else:
+                    # Retrieve minimum ESS among scalar parameters (conservative summary)
+                    ess_cols = [c for c in diagnostics.columns if 'ess' in c]
+                    ess = np.min(
+                        diagnostics.iloc[-1,:][ess_cols]
+                    )
+                    
+                    # Perform PSIS
+                    start_psis = time.time_ns()
+                    weights, k_hat, cutoff_idx, cutoff_value, sigma = cls.__psislw(
+                        lw=np.asarray(raw_weights, dtype=np.float64),
+                        overwrite_lw=False,
+                        Reff=ess/len(samples)
+                    )
+                    end_psis = time.time_ns()
+                    logger.info('Time spent in PSIS (seconds): {}'.format(round((end_psis-start_psis)/1E9, 2)))
+
+                # Log
+                impsamp_results['prior_variation']['raw_weights'].append(np.exp(raw_weights - np.max(raw_weights)))
+                impsamp_results['prior_variation']['weights'].append(np.exp(weights))
+                if run_psis:
+                    impsamp_results['prior_variation']['k_hat'].append(k_hat)
+                    impsamp_results['prior_variation']['cutoff_idx'].append(cutoff_idx)
+                    impsamp_results['prior_variation']['cutoff_value'].append(cutoff_value)
+                    impsamp_results['prior_variation']['sigma'].append(sigma)
+
+        # Get weights for source model variation analysis
+        if 'source_model_variation' in impsamp_results.keys():
+            impsamp_results['source_model_variation']['raw_weights'] = []
+            impsamp_results['source_model_variation']['weights'] = []
+            if run_psis:
+                impsamp_results['source_model_variation']['k_hat'] = []
+                impsamp_results['source_model_variation']['cutoff_idx'] = []
+                impsamp_results['source_model_variation']['cutoff_value'] = []
+                impsamp_results['source_model_variation']['sigma'] = []
+            for target_posterior in impsamp_results['source_model_variation']['targets']:
+                # Get raw weights
+                raw_weights = __get_one_posterior(
+                    samples=samples,
+                    baseline_posterior=impsamp_results['source_model_variation']['baseline'],
+                    target_posterior=target_posterior,
+                    x=x
                 )
 
                 # Get final weights
@@ -1666,17 +1805,20 @@ class ImportanceSamplingEstimator:
                     )
                     
                     # Perform PSIS
-                    weights, k_hat = cls.__psislw(
-                        lw=np.log(raw_weights),
+                    weights, k_hat, cutoff_idx, cutoff_value, sigma = cls.__psislw(
+                        lw=np.asarray(raw_weights, dtype=np.float64),
                         overwrite_lw=False,
                         Reff=ess/len(samples)
                     )
 
                 # Log
-                impsamp_results['prior_variation']['raw_weights'].append(raw_weights)
-                impsamp_results['prior_variation']['weights'].append(np.exp(weights))
+                impsamp_results['source_model_variation']['raw_weights'].append(np.exp(raw_weights - np.max(raw_weights)))
+                impsamp_results['source_model_variation']['weights'].append(np.exp(weights))
                 if run_psis:
-                    impsamp_results['prior_variation']['k_hat'].append(k_hat)
+                    impsamp_results['source_model_variation']['k_hat'].append(k_hat)
+                    impsamp_results['source_model_variation']['cutoff_idx'].append(cutoff_idx)
+                    impsamp_results['source_model_variation']['cutoff_value'].append(cutoff_value)
+                    impsamp_results['source_model_variation']['sigma'].append(sigma)
 
         cls.impsamp_results = impsamp_results
 
@@ -1689,59 +1831,80 @@ class ImportanceSamplingEstimator:
             samples,
             weights
         ):
-            # Get sum total of weights
-            sum_weights = np.sum(weights)
+            # Normalized numpy array for weights
+            w = np.asarray(
+                weights,
+                dtype=np.float64
+            ) 
+            w = w / w.sum()
             
+            # Numpy array for samples
+            S = np.asarray(
+                samples,
+                dtype=np.float64
+            )
+
             # Get mean
-            B_mean = np.sum([
-                s*w for s, w in zip(samples, weights)
-            ], axis=0)/sum_weights
+            mean = np.tensordot(
+                w,
+                S,
+                axes=1
+            )
 
-            # Differences wrt mean
-            mean_diffs = np.array([
-                np.subtract(
-                    s,
-                    B_mean
-                ) for s in samples
-            ])
+            # Centralize
+            D = S - mean; 
+            D2 = D * D
+            
+            # Get variance
+            var = np.tensordot(
+                w,
+                D2,
+                axes=1
+            )
 
-            # Get variance 
-            B_var = np.sum([
-                w*np.power(d, 2) for d, w in zip(mean_diffs, weights)
-            ], axis=0)/sum_weights
+            # Get skew
+            skew = np.tensordot(
+                w,
+                D2 * D,
+                axes=1
+            )/var**1.5
 
-            # Get skew 
-            B_skew = np.sum([
-                w*np.power(d, 3) for d, w in zip(mean_diffs, weights)
-            ], axis=0)/sum_weights
-
-            # Get kurtosis 
-            B_kurt = np.sum([
-                w*np.power(d, 4) for d, w in zip(mean_diffs, weights)
-            ], axis=0)/sum_weights
+            # Get excess kurtosis
+            kurt = (
+                np.tensordot(
+                    w,
+                    D2 * D2,
+                    axes=1
+                )/var**2
+            ) - 3
 
             return {
-                'mean': B_mean,
-                'var': B_var,
-                'skew': B_skew,
-                'kurt': B_kurt
+                'mean': mean,
+                'var': var,
+                'skew': skew,
+                'kurt': kurt
             }
         
         for analysis_type, analysis_params in cls.impsamp_results.items():
-            analysis_params['means'] = []
-            analysis_params['vars'] = []
-            analysis_params['skews'] = []
-            analysis_params['kurts'] = []
-            for weights in analysis_params['weights']:
-                r = __get_moments(
-                    samples,
-                    weights
-                )
-                analysis_params['means'].append(r['mean'])
-                analysis_params['vars'].append(r['var'])
-                analysis_params['skews'].append(r['skew'])
-                analysis_params['kurts'].append(r['kurt'])
-
+            for weights_key, prefix in (
+                ('weights', ''),
+                ('raw_weights', 'raw_')
+            ):
+                # Skip if this weight type was not stored
+                if weights_key not in analysis_params:
+                    continue
+                for m in ('means', 'vars', 'skews', 'kurts'):
+                    analysis_params[prefix+m] = []
+                for weights in analysis_params[weights_key]:
+                    r = __get_moments(
+                        samples,
+                        weights
+                    )
+                    analysis_params[prefix+'means'].append(r['mean'])
+                    analysis_params[prefix+'vars'].append(r['var'])
+                    analysis_params[prefix+'skews'].append(r['skew'])
+                    analysis_params[prefix+'kurts'].append(r['kurt'])
+                    
             cls.impsamp_results[analysis_type].update(analysis_params)
 
     @classmethod
@@ -1757,9 +1920,10 @@ class ImportanceSamplingEstimator:
         source_model_control_params=None,
         x=None,
         run_psis=True,
-        ess_ratio_thresh: float = 0.1,
-        eps: float = 1e-300,
-        show_progress: bool = False,
+        analysis_type=None,
+        param_type=None,
+        score_fn=None,
+        n_chains=None
     ):
         
         # Resolve importance sampling experiment configurations
@@ -1784,6 +1948,23 @@ class ImportanceSamplingEstimator:
         cls.__get_estimates(
             samples=samples
         )
+
+        # Sensibilidade local no ponto base (pesos uniformes: sem PSIS, sem k-hat)
+        if score_fn is not None:
+            samples64 = np.asarray(samples, dtype=np.float64)
+            scores = score_fn(
+                samples=samples64,
+                x=None if x is None else np.asarray(x, dtype=np.float64),
+                baseline_prior=baseline_prior,
+                baseline_source_model=baseline_source_model
+            )
+            sensitivity = cls.__get_local_sensitivity(
+                samples=samples64,
+                scores=scores,
+                n_batches=None if n_chains is None else 2*n_chains
+            )
+            sensitivity.update({'analysis_type': analysis_type, 'param_type': param_type})
+            cls.impsamp_results[analysis_type]['local_sensitivity'] = sensitivity
 
         return cls.impsamp_results
 

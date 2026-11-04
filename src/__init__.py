@@ -1,10 +1,10 @@
 from .model import InstantaneousMixtureModel
 from .estimator import MAPGradientAscentEstimator, MMSEMetropolisHastingsEstimator, BayesianEstimators, MMSEBarkerMHEstimator, ImportanceSamplingEstimator
-from .utilities import MCMCGraphPlotter, MAPGradientAscentGraphPlotter, ContourLineGraphPlotter, SignalGraphPlotter, EstimationGraphPlotter, PosteriorUtilities
+from .utilities import MCMCGraphPlotter, MAPGradientAscentGraphPlotter, ContourLineGraphPlotter, SignalGraphPlotter, EstimationGraphPlotter, PosteriorUtilities, AnalysisUtilities, LocalSensitivityScores, GenerateConfigs
 from .contour_line import PosteriorContourLines
 from .prior import ExponentialPrior, MultivariateTPrior
 from .source import LogisticSource, TriangularSource, StandardLogisticSource, StudentTSource
-from .executor import DiscreteExperimentExecutor, DiscreteExperimentParser, ContinuousExperimentExecutor
+from .executor import DiscreteExperimentExecutor, DiscreteExperimentParser, ContinuousExperimentExecutor, ContinuousExperimentParser
 from .hypothesis_tests import HypothesisTestsCases
 from .visualizations import VisualizationUtilities
 from .logging import LoggingUtilities
