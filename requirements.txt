@@ -1,0 +1,41 @@
+# bayesian_bss - Python dependencies
+# Install from the repo root with:
+#     pip install -r requirements.txt
+# Requires Python >= 3.10.
+#
+# Lower bounds reflect APIs used in src/:
+#   numpy>=2.0        np.asarray(..., copy=True) in estimator.py
+#   seaborn>=0.13     boxplot(linecolor=...), palette='dark:<color>', move_legend
+#   numpyro>=0.15     BarkerMH kernel, MCMC.warmup(collect_warmup=...)
+#   jax>=0.4.26       NumPy 2 support, jax.live_arrays(), jax.clear_caches()
+#   scipy>=1.13       NumPy 2 support, stats.multivariate_t
+#
+# For bit-exact reproduction of an existing run (or to reload its dill pickles),
+# install the environment recorded by the launcher instead:
+#     pip install -r <experiment>/output/<run>/requirements.lock.txt
+
+# Numerical core
+numpy>=2.0,<3
+scipy>=1.13
+pandas>=2.2.2
+
+# JAX + probabilistic programming (CPU build; launchers set JAX_PLATFORMS=cpu)
+jax>=0.4.26
+jaxlib>=0.4.26
+numpyro>=0.15
+
+# Serialization and multiprocessing (pathos pins a compatible dill/multiprocess)
+dill>=0.3.8
+pathos>=0.3.2
+
+# Statistics / ML (hypothesis_tests.py)
+scikit-learn>=1.4.2
+
+# Plotting (utilities.py, visualizations.py, hypothesis_tests.py)
+matplotlib>=3.8.4
+seaborn>=0.13
+plotly>=5.0
+
+# Utilities
+tqdm>=4.66
+psutil>=5.9

@@ -5,7 +5,9 @@ jax.config.update("jax_enable_x64", True)
 import sys
 import dill
 from pathlib import Path
-sys.path.append('/Users/leonardo.tessarolo/git/bayesian_bss/')
+
+REPO_ROOT = Path(__file__).resolve().parents[1]   # bayesian_bss/
+sys.path.append(str(REPO_ROOT))
 
 import numpy as np
 import argparse
@@ -64,7 +66,7 @@ def arguments():
     parser.add_argument(
         "--output-dir",
         type=str,
-        default='./output',
+        default='./discrete_experiment/output',
         help="Base output directory."
     )
 
@@ -122,6 +124,10 @@ if __name__ == "__main__":
     else:
         with (experiment_dir/'execution_config.pkl').open('rb') as f:
             exec_configs = dill.load(f)
+        
+        # Point the saved paths at the current layout (configs saved under final_experiment/ hold stale relative paths)
+        exec_configs['general']['base_output_path'] = base_output_path
+        exec_configs['general']['experiment_dir'] = experiment_dir
     
     # Initialize folder structure, if so specified
     if CREATE_FOLDER_STRUCTURE:
