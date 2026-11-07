@@ -1,0 +1,12 @@
+# Python bytecode and cache directories
+*.pyc
+__pycache__/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Entire legacy directory
+/legacy/
+
+# MacOS metadata files
+.DS_Store
