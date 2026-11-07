@@ -1844,13 +1844,58 @@ class ContinuousExperimentParser:
     def __init__(
         self,
         experiment_dir,
-        filter_converged=True
+        filter_converged=True,
+        load_signals=True,
+        load_diagnostics=True,
+        load_estimates=True
     ):
         # Save experiment dir
         self.experiment_dir = experiment_dir
 
         # Save filtering configuration
         self.filter_converged=filter_converged
+
+        # Save loading configurations
+        self.load_signals=load_signals
+        self.load_diagnostics=load_diagnostics
+        self.load_estimates=load_estimates
+        
+        ############################## 
+        # Fields under each grouping #
+        ##############################
+        
+        # Signals
+        self.signals_fields = [
+            's',
+            'x'
+        ]
+
+        # Diagnostics
+        self.diagnostics_fields = [
+            'merged_baseline_samples',
+            'raw_baseline_samples',
+            'mcmc',
+            'cutoff_idx',
+            'cutoff_value',
+            'sigma'
+        ]
+
+        # IS estimates
+        self.estimates_fields = [
+            'targets',
+            'baseline',
+            'raw_weights',
+            'weights',
+            'means',
+            'vars',
+            'skews',
+            'kurts',
+            'raw_means',
+            'raw_vars',
+            'raw_skews',
+            'raw_kurts',
+            'local_sensitivity'
+        ]
 
 
     def __read_execution_configs(self):
@@ -1910,6 +1955,42 @@ class ContinuousExperimentParser:
             print('Total of {} realizations without executed results'.format(len(non_executed_realizations)))
             print('#'*100)
 
+    
+    def __evaluate_entry(
+        self,
+        entry
+    ):
+        """
+            Evaluates MCMC convergence and PSIS reliability for one
+            (realization, analysis, variation, source) entry, BEFORE pruning.
+            Returns (rhat_ok, khat_ok).
+        """
+        R_thresh = self.execution_config['mcmc']['R_hat_thresh']
+
+        # MCMC: sampler flag + last R-hat evaluation (all coefficients finite and below threshold)
+        rhat_ok = bool(entry['mcmc']['converged'])
+        if R_thresh is not None:
+            diag = entry['mcmc']['diagnostics']
+            rhat_cols = [c for c in diag.columns if c.startswith('r_hat')]
+            if diag.empty or not rhat_cols:
+                rhat_ok = False
+            else:
+                last = diag[rhat_cols].iloc[-1].to_numpy(dtype=float)
+                rhat_ok = rhat_ok and bool(np.isfinite(last).all() and (last < R_thresh).all())
+
+        # PSIS: k-hat finite and below threshold at every target
+        khat_ok = True
+        if self.k_hat_thresh is not None:
+            k = np.asarray(
+                entry['k_hat'],
+                dtype=float
+            )
+            khat_ok = bool(
+                k.size > 0 and np.isfinite(k).all() and (k < self.k_hat_thresh).all()
+            )
+
+        return rhat_ok, khat_ok
+
 
     @staticmethod
     def __subset(
@@ -1952,37 +2033,28 @@ class ContinuousExperimentParser:
         seen = {r: 0 for r in all_ids}
         report = []
 
-        # --- 1ª passada: avalia cada realização em cada entrada ---
+        # --- 1st pass: evaluate each realization in each entry ---
         for s, a, v, e in entries:
+            n = len(e['realization'])
+            for key in ('rhat_ok', 'khat_ok'):
+                if len(e[key]) != n:
+                    raise ValueError(
+                        f"{a}/{v}/{s}: '{key}' has {len(e[key])} entries, expected {n}"
+                    )
+            
             n_rhat_fail, n_khat_fail = 0, 0
-            conv_flags = e.get('mcmc_converged', [True] * len(e['realization']))
-
-            for r, diag, k_hat, conv in zip(
-                e['realization'], e['mcmc_diagnostics'], e['k_hat'], conv_flags
-            ):
+            for r, rhat_ok, khat_ok in zip(e['realization'], e['rhat_ok'], e['khat_ok']):
                 seen[r] += 1
-
-                # MCMC: flag do sampler + R-hat da última avaliação
-                rhat_ok = bool(conv)
-                if R_thresh is not None:
-                    rhat_cols = [c for c in diag.columns if c.startswith('r_hat')]
-                    rhat_ok &= bool(diag[rhat_cols].iloc[-1].max() < R_thresh)   # NaN => False
-
-                # PSIS: k-hat em todos os pontos da varredura
-                khat_ok = True
-                if self.k_hat_thresh is not None:
-                    khat_ok = bool(np.max(np.asarray(k_hat, dtype=float)) < self.k_hat_thresh)  # inf/NaN => False
-
                 n_rhat_fail += int(not rhat_ok)
                 n_khat_fail += int(not khat_ok)
                 if not (rhat_ok and khat_ok):
                     ok[r] = False
-
+            
             report.append({
                 'analysis_type': a,
                 'param_type': v,
                 'source': s,
-                'n_total': len(e['realization']),
+                'n_total': n,
                 'n_rhat_fail': n_rhat_fail,
                 'n_khat_fail': n_khat_fail
             })
@@ -2039,19 +2111,24 @@ class ContinuousExperimentParser:
                         for s in list(
                             self.execution_config['sources'].keys()
                         ):
+                            # Skip empty entries
+                            if not parsed_results[analysis_type][param_type]:
+                                continue
+                            
                             entry = parsed_results[analysis_type][param_type][s]
-
-                            for key in (
-                                # "raw_baseline_samples",
-                                "merged_baseline_samples",
-                                "raw_weights",
-                                # "weights",
+                            
+                            # Evaluate filters while diagnostics are still in memory
+                            if self.filter_converged:
+                                entry['rhat_ok'], entry['khat_ok'] = self.__evaluate_entry(entry=entry)
+                            
+                            # Remove designated fields from estimates
+                            for flag, fields_list in zip(
+                                [self.load_signals, self.load_diagnostics, self.load_estimates],
+                                [self.signals_fields, self.diagnostics_fields, self.estimates_fields]
                             ):
-                                entry.pop(key, None)
-
-                            # Keep the keys expected by __format_results, without the large arrays.
-                            entry["raw_weights"] = None
-                            entry["weights"] = None
+                                if not flag:
+                                    for key in fields_list:
+                                        entry[key] = None
 
             return parsed_results
         
@@ -2073,8 +2150,12 @@ class ContinuousExperimentParser:
                 } for s in sources
             }
 
-            prior_variations = [k for k in self.execution_config['prior_variation'].keys() if len(self.execution_config['prior_variation'][k])>0]
-            source_model_variations = self.execution_config['source_model_variation'].keys()
+            prior_variations = [
+                k for k, v in self.execution_config['prior_variation'].items() if len(v)>0
+            ]
+            source_model_variations = [
+                k for k, v in self.execution_config['source_model_variation'].items() if len(v) > 0
+            ]
             prior_source_model_variations = self.execution_config['prior_source_model_variation'].keys()
 
             # Initialize prior variations fields
@@ -2103,7 +2184,13 @@ class ContinuousExperimentParser:
                             'vars': [],
                             'skews': [],
                             'kurts': [],
-                            'local_sensitivity': []
+                            "raw_means": [],
+                            "raw_vars": [],
+                            "raw_skews": [],
+                            "raw_kurts": [],
+                            'local_sensitivity': [],
+                            'rhat_ok': [],
+                            'khat_ok': []
                         }
 
             # Initialize likelihood variations fields
@@ -2132,7 +2219,13 @@ class ContinuousExperimentParser:
                                 'vars': [],
                                 'skews': [],
                                 'kurts': [],
-                                'local_sensitivity': []
+                                "raw_means": [],
+                                "raw_vars": [],
+                                "raw_skews": [],
+                                "raw_kurts": [],
+                                'local_sensitivity': [],
+                                'rhat_ok': [],
+                                'khat_ok': []
                             }
 
             # Initialize prior+likelihood variations fields
@@ -2147,54 +2240,72 @@ class ContinuousExperimentParser:
                         for prior_variation in prior_variations:
                             pv = r['prior_variation'][prior_variation][s]
                             parsed_results[s]['prior_variation'][prior_variation]['realization'].append(r['realization'])
-                            parsed_results[s]['prior_variation'][prior_variation]['s'].append(pv['s'])
-                            parsed_results[s]['prior_variation'][prior_variation]['x'].append(pv['x'])
-                            parsed_results[s]['prior_variation'][prior_variation]['raw_baseline_samples'].append(pv['raw_baseline_samples'])
-                            # parsed_results[s]['prior_variation'][prior_variation]['merged_baseline_samples'].append(pv['merged_baseline_samples'])
-                            parsed_results[s]['prior_variation'][prior_variation]['mcmc_diagnostics'].append(pv['mcmc']['diagnostics'])
-                            parsed_results[s]['prior_variation'][prior_variation]['mcmc_logs'].append(pv['mcmc']['logs'])
-                            parsed_results[s]['prior_variation'][prior_variation]['mcmc_converged'].append(pv['mcmc']['converged'])
-                            parsed_results[s]['prior_variation'][prior_variation]['targets'].append(pv['targets'])
-                            parsed_results[s]['prior_variation'][prior_variation]['baseline'].append(pv['baseline'])
+                            parsed_results[s]['prior_variation'][prior_variation]['rhat_ok'].append(pv.get('rhat_ok'))
+                            parsed_results[s]['prior_variation'][prior_variation]['khat_ok'].append(pv.get('khat_ok'))
                             parsed_results[s]['prior_variation'][prior_variation]['params'].append(pv['params'])
-                            # parsed_results[s]['prior_variation'][prior_variation]['raw_weights'].append(pv['raw_weights'])
-                            parsed_results[s]['prior_variation'][prior_variation]['weights'].append(pv['weights'])
                             parsed_results[s]['prior_variation'][prior_variation]['k_hat'].append(pv['k_hat'])
-                            parsed_results[s]['prior_variation'][prior_variation]['cutoff_idx'].append(pv['cutoff_idx'])
-                            parsed_results[s]['prior_variation'][prior_variation]['cutoff_value'].append(pv['cutoff_value'])
-                            parsed_results[s]['prior_variation'][prior_variation]['sigma'].append(pv['sigma'])
-                            parsed_results[s]['prior_variation'][prior_variation]['means'].append(pv['means'])
-                            parsed_results[s]['prior_variation'][prior_variation]['vars'].append(pv['vars'])
-                            parsed_results[s]['prior_variation'][prior_variation]['skews'].append(pv['skews'])
-                            parsed_results[s]['prior_variation'][prior_variation]['kurts'].append(pv['kurts'])
-                            parsed_results[s]['prior_variation'][prior_variation]['local_sensitivity'].append(pv['local_sensitivity'])
+                            if self.load_signals:
+                                parsed_results[s]['prior_variation'][prior_variation]['s'].append(pv['s'])
+                                parsed_results[s]['prior_variation'][prior_variation]['x'].append(pv['x'])
+                            if self.load_diagnostics:
+                                parsed_results[s]['prior_variation'][prior_variation]['raw_baseline_samples'].append(pv['raw_baseline_samples'])
+                                parsed_results[s]['prior_variation'][prior_variation]['merged_baseline_samples'].append(pv['merged_baseline_samples'])
+                                parsed_results[s]['prior_variation'][prior_variation]['mcmc_diagnostics'].append(pv['mcmc']['diagnostics'])
+                                parsed_results[s]['prior_variation'][prior_variation]['mcmc_logs'].append(pv['mcmc']['logs'])
+                                parsed_results[s]['prior_variation'][prior_variation]['mcmc_converged'].append(pv['mcmc']['converged'])
+                                parsed_results[s]['prior_variation'][prior_variation]['cutoff_idx'].append(pv['cutoff_idx'])
+                                parsed_results[s]['prior_variation'][prior_variation]['cutoff_value'].append(pv['cutoff_value'])
+                                parsed_results[s]['prior_variation'][prior_variation]['sigma'].append(pv['sigma'])
+                            if self.load_estimates:
+                                parsed_results[s]['prior_variation'][prior_variation]['targets'].append(pv['targets'])
+                                parsed_results[s]['prior_variation'][prior_variation]['baseline'].append(pv['baseline'])
+                                parsed_results[s]['prior_variation'][prior_variation]['raw_weights'].append(pv['raw_weights'])
+                                parsed_results[s]['prior_variation'][prior_variation]['weights'].append(pv['weights'])
+                                parsed_results[s]['prior_variation'][prior_variation]['means'].append(pv['means'])
+                                parsed_results[s]['prior_variation'][prior_variation]['vars'].append(pv['vars'])
+                                parsed_results[s]['prior_variation'][prior_variation]['skews'].append(pv['skews'])
+                                parsed_results[s]['prior_variation'][prior_variation]['kurts'].append(pv['kurts'])
+                                parsed_results[s]['prior_variation'][prior_variation]['raw_means'].append(pv['raw_means'])
+                                parsed_results[s]['prior_variation'][prior_variation]['raw_vars'].append(pv['raw_vars'])
+                                parsed_results[s]['prior_variation'][prior_variation]['raw_skews'].append(pv['raw_skews'])
+                                parsed_results[s]['prior_variation'][prior_variation]['raw_kurts'].append(pv['raw_kurts'])
+                                parsed_results[s]['prior_variation'][prior_variation]['local_sensitivity'].append(pv['local_sensitivity'])
             
                     # Parse source model variations
                     if len(source_model_variations)>0:
                         for source_model_variation in source_model_variations:
                             smv = r['source_model_variation'][source_model_variation][s]
                             parsed_results[s]['source_model_variation'][source_model_variation]['realization'].append(r['realization'])
-                            parsed_results[s]['source_model_variation'][source_model_variation]['s'].append(smv['s'])
-                            parsed_results[s]['source_model_variation'][source_model_variation]['x'].append(smv['x'])
-                            parsed_results[s]['source_model_variation'][source_model_variation]['raw_baseline_samples'].append(smv['raw_baseline_samples'])
-                            # parsed_results[s]['source_model_variation'][source_model_variation]['merged_baseline_samples'].append(smv['merged_baseline_samples'])
-                            parsed_results[s]['source_model_variation'][source_model_variation]['mcmc_diagnostics'].append(smv['mcmc']['diagnostics'])
-                            parsed_results[s]['source_model_variation'][source_model_variation]['mcmc_logs'].append(smv['mcmc']['logs'])
-                            parsed_results[s]['source_model_variation'][source_model_variation]['mcmc_converged'].append(smv['mcmc']['converged'])
-                            parsed_results[s]['source_model_variation'][source_model_variation]['targets'].append(smv['targets'])
-                            parsed_results[s]['source_model_variation'][source_model_variation]['baseline'].append(smv['baseline'])
+                            parsed_results[s]['source_model_variation'][source_model_variation]['rhat_ok'].append(smv.get('rhat_ok'))
+                            parsed_results[s]['source_model_variation'][source_model_variation]['khat_ok'].append(smv.get('khat_ok'))
                             parsed_results[s]['source_model_variation'][source_model_variation]['params'].append(smv['params'])
-                            # parsed_results[s]['source_model_variation'][source_model_variation]['raw_weights'].append(smv['raw_weights'])
-                            parsed_results[s]['source_model_variation'][source_model_variation]['weights'].append(smv['weights'])
                             parsed_results[s]['source_model_variation'][source_model_variation]['k_hat'].append(smv['k_hat'])
-                            parsed_results[s]['source_model_variation'][source_model_variation]['cutoff_idx'].append(smv['cutoff_idx'])
-                            parsed_results[s]['source_model_variation'][source_model_variation]['cutoff_value'].append(smv['cutoff_value'])
-                            parsed_results[s]['source_model_variation'][source_model_variation]['sigma'].append(smv['sigma'])
-                            parsed_results[s]['source_model_variation'][source_model_variation]['means'].append(smv['means'])
-                            parsed_results[s]['source_model_variation'][source_model_variation]['vars'].append(smv['vars'])
-                            parsed_results[s]['source_model_variation'][source_model_variation]['skews'].append(smv['skews'])
-                            parsed_results[s]['source_model_variation'][source_model_variation]['kurts'].append(smv['kurts'])
-                            parsed_results[s]['source_model_variation'][source_model_variation]['local_sensitivity'].append(smv['local_sensitivity'])
+                            if self.load_signals:
+                                parsed_results[s]['source_model_variation'][source_model_variation]['s'].append(smv['s'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['x'].append(smv['x'])
+                            if self.load_diagnostics:
+                                parsed_results[s]['source_model_variation'][source_model_variation]['raw_baseline_samples'].append(smv['raw_baseline_samples'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['merged_baseline_samples'].append(smv['merged_baseline_samples'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['mcmc_diagnostics'].append(smv['mcmc']['diagnostics'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['mcmc_logs'].append(smv['mcmc']['logs'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['mcmc_converged'].append(smv['mcmc']['converged'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['cutoff_idx'].append(smv['cutoff_idx'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['cutoff_value'].append(smv['cutoff_value'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['sigma'].append(smv['sigma'])
+                            if self.load_estimates:
+                                parsed_results[s]['source_model_variation'][source_model_variation]['targets'].append(smv['targets'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['baseline'].append(smv['baseline'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['raw_weights'].append(smv['raw_weights'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['weights'].append(smv['weights'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['means'].append(smv['means'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['vars'].append(smv['vars'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['skews'].append(smv['skews'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['kurts'].append(smv['kurts'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['raw_means'].append(smv['raw_means'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['raw_vars'].append(smv['raw_vars'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['raw_skews'].append(smv['raw_skews'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['raw_kurts'].append(smv['raw_kurts'])
+                                parsed_results[s]['source_model_variation'][source_model_variation]['local_sensitivity'].append(smv['local_sensitivity'])
 
                     # Parse prior+likelihood variations
                     if len(prior_source_model_variations)>0:
